@@ -1,0 +1,110 @@
+{
+    "_comment": "MPS headless pipeline — default parameters for steps 1–4g.",
+
+    "step1": {
+        "n_workers": 8,
+        "memory_limit": "200GB"
+    },
+
+    "step2a": {
+        "pattern": ".*\\.avi$",
+        "downsample": {"frame": 1, "height": 1, "width": 1},
+        "downsample_strategy": "subset",
+        "detect_line_splitting": true
+    },
+
+    "step2b": {
+        "denoise_method": "median",
+        "kernel_size": 3,
+        "bg_method": "tophat",
+        "bg_window": 30,
+        "processing_order": "bg_first"
+    },
+
+    "step2c": {
+        "dim": "frame",
+        "subset_mc": false
+    },
+
+    "step2d": {
+        "threshold_factor": 3.0,
+        "drop_frames": true
+    },
+
+    "step2e": {
+        "fill_value": 0.0,
+        "create_frame_chunks": true,
+        "create_spatial_chunks": true
+    },
+
+    "step3a": {
+        "_comment": "Circular crop centred on the imaging field. Use use_full_frame=true to skip cropping.",
+        "radius_factor": 0.75,
+        "y_offset": 0,
+        "x_offset": 0,
+        "use_full_frame": false
+    },
+
+    "step3b": {
+        "n_components": 100,
+        "n_power_iter": 5,
+        "sparsity_threshold": 0.05,
+        "spatial_reg": 1.0,
+        "chunk_size": 1000
+    },
+
+    "step4a": {
+        "min_distances": [10, 20, 30],
+        "threshold_rels": [0.1, 0.2],
+        "sigmas": [1.0, 2.0],
+        "sample_size": 20,
+        "include_bg": false
+    },
+
+    "step4b": {
+        "_comment": "Set min_distance/threshold_rel/sigma to null to use step4a suggestions.",
+        "min_distance": null,
+        "threshold_rel": null,
+        "sigma": null,
+        "min_size": 9
+    },
+
+    "step4c": {
+        "distance_threshold": 25.0,
+        "size_ratio_threshold": 5.0,
+        "min_size": 9,
+        "max_size": 10000,
+        "use_parallel": false
+    },
+
+    "step4d": {
+        "batch_size": 10,
+        "frame_chunk_size": 10000,
+        "component_limit": null,
+        "use_managed_memory": true,
+        "use_garbage_collection": true
+    },
+
+    "step4e": {
+        "spatial_norm": "max",
+        "min_size": 1,
+        "max_components": null,
+        "skip_bg": true,
+        "check_nan": true
+    },
+
+    "step4f": {
+        "max_components": null,
+        "check_nan": true,
+        "check_empty": true,
+        "check_flat": true
+    },
+
+    "step4g": {
+        "temporal_corr_threshold": 0.75,
+        "spatial_overlap_threshold": 0.3,
+        "max_size": 10000,
+        "input_type": "clean",
+        "max_components": null
+    }
+}
