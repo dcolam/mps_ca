@@ -3,7 +3,8 @@
 
     "step1": {
         "n_workers": 8,
-        "memory_limit": "200GB"
+        "memory_limit": "200GB",
+        "dask_local_dir": null
     },
 
     "step2a": {

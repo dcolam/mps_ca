@@ -104,6 +104,7 @@ class SessionRunner:
             output_dir=self.session.output_root,
             n_workers=c["step1"]["n_workers"],
             memory_limit=c["step1"]["memory_limit"],
+            dask_local_dir=c["step1"].get("dask_local_dir"),
         )
 
         self._run_steps_2_to_4g(ctrl, sr, c)
@@ -357,6 +358,7 @@ class ExperimentRunner(SessionRunner):
             n_workers=c["step1"]["n_workers"],
             memory_limit=c["step1"]["memory_limit"],
             output_path_override=self.session.dataset_output_path,
+            dask_local_dir=c["step1"].get("dask_local_dir"),
         )
 
         self._run_steps_2_to_4g(ctrl, sr, c)

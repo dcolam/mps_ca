@@ -46,6 +46,7 @@ def run_step1(
     n_workers: int = 8,
     memory_limit: str = "200GB",
     output_path_override: Optional[str] = None,
+    dask_local_dir: Optional[str] = None,
 ) -> None:
     """
     Replicates Step1Setup._initialize_thread without tkinter.
@@ -55,6 +56,10 @@ def run_step1(
         output_path_override: When set, use this as dataset_output_path instead
             of the default "{output_dir}/{animal_id}_{session_id}_Processed".
             Used by ExperimentRunner to place outputs at the experiment level.
+        dask_local_dir: Local directory for Dask worker scratch files. Should
+            point to a fast local disk (e.g. C:/temp/dask-scratch), not a
+            network drive. Avoids the "scratch directories taking surprisingly
+            long time" warning and associated nanny crashes on Windows.
     """
     logger.info("[Step 1] Initializing project configuration")
 
@@ -64,6 +69,7 @@ def run_step1(
     controller.state["output_dir"] = output_dir
     controller.state["n_workers"] = n_workers
     controller.state["memory_limit"] = memory_limit
+    controller.state["dask_local_dir"] = dask_local_dir
     controller.state["video_percent"] = 100
     controller.state["initialized"] = True
     controller.state.setdefault("results", {})
@@ -85,6 +91,53 @@ def run_step1(
     logger.info(f"[Step 1] cache_path = {cache_path}")
 
 
+# ── Dask configuration ────────────────────────────────────────────────────────
+
+def _configure_dask(local_dir: Optional[str] = None) -> None:
+    """
+    Configure Dask before step2a creates the LocalCluster.
+
+    1. Sets the worker scratch directory via dask.config so workers don't
+       write temp files to the network drive (fixes the
+       "scratch directories taking surprisingly long time" warning and the
+       associated nanny crashes on Windows).
+    2. Monkey-patches LocalCluster to use dashboard_address=":0" so that
+       parallel experiments don't all fight over port 8787.
+    """
+    try:
+        import dask
+
+        if local_dir:
+            os.makedirs(local_dir, exist_ok=True)
+            dask.config.set({"temporary-directory": local_dir})
+            logger.info(f"[Dask] temporary-directory → {local_dir}")
+
+        # Also patch the dashboard port — dask.config has no clean key for this,
+        # so we wrap LocalCluster once per process.
+        import dask.distributed as _dd
+        _Orig = _dd.LocalCluster
+        if getattr(_dd.LocalCluster, "_headless_patched", False):
+            return
+
+        def _patched_cluster(*args, **kwargs):
+            kwargs["dashboard_address"] = ":0"
+            return _Orig(*args, **kwargs)
+
+        _patched_cluster._headless_patched = True
+        _dd.LocalCluster = _patched_cluster
+        # Also patch the top-level distributed module (same object, but be safe)
+        try:
+            import distributed as _dist
+            if _dist.LocalCluster is _Orig:
+                _dist.LocalCluster = _patched_cluster
+        except Exception:
+            pass
+
+        logger.info("[Dask] LocalCluster patched — dashboard_address=:0")
+    except Exception as exc:
+        logger.warning(f"[Dask] configuration failed: {exc}")
+
+
 # ── Step 2a: Video Loading ─────────────────────────────────────────────────────
 
 def run_step2a(
@@ -96,6 +149,8 @@ def run_step2a(
 ) -> None:
     """Run Step 2a: load AVI files, write zarr, store xarray in state."""
     logger.info("[Step 2a] Loading videos")
+
+    _configure_dask(controller.state.get("dask_local_dir"))
 
     ds = downsample or {"frame": 1, "height": 1, "width": 1}
     param_load_videos = {
