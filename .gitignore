@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.zarr/
+*.avi
+*.tif
+*.tiff
+.idea/
+EOF
