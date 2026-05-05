@@ -406,6 +406,16 @@ def find_files_to_convert(
     return pairs
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _relpath_safe(path: str, start: str = None) -> str:
+    """os.path.relpath that never raises on Windows cross-drive paths."""
+    try:
+        return os.path.relpath(path, start) if start else os.path.relpath(path)
+    except ValueError:
+        return path
+
+
 # ── Per-file conversion dispatch ──────────────────────────────────────────────
 
 def convert_one(
@@ -416,7 +426,7 @@ def convert_one(
     dry_run: bool = False,
 ) -> Tuple[str, bool]:
     """Convert one file. Returns (output_path, success)."""
-    rel = os.path.relpath(input_path)
+    rel = _relpath_safe(input_path)
     if dry_run:
         print(f"  [DRY RUN] {rel}")
         print(f"         → {output_path}")
@@ -529,8 +539,8 @@ def main():
     if args.dry_run:
         data_root = args.data_dir or os.path.dirname(pairs[0][0])
         for inp, out in pairs:
-            rel_in  = os.path.relpath(inp, data_root)
-            rel_out = os.path.relpath(out, args.output_dir) if args.output_dir else os.path.basename(out)
+            rel_in  = _relpath_safe(inp, data_root)
+            rel_out = _relpath_safe(out, args.output_dir) if args.output_dir else os.path.basename(out)
             dest = f"[output_dir]/{rel_out}" if args.output_dir else f"(alongside) {rel_out}"
             print(f"  {rel_in}")
             print(f"    → {dest}")
