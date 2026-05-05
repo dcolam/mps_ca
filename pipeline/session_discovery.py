@@ -176,16 +176,39 @@ class ExperimentGroup:
         MPS step2a scans a single directory for AVIs; this lets it treat all
         conditions as one continuous session for ROI extraction.
 
+        Also writes chunk_manifest.json — maps each chunk filename back to its
+        source condition and original AVI path, so frames can be traced back
+        to conditions after analysis.
+
         Falls back to copies when symlinks are unsupported (e.g. drvfs mounts).
 
         Returns the merged directory path.
         """
+        import json
         import shutil
         os.makedirs(self.merged_dir, exist_ok=True)
         all_avis = self.all_avi_files
+
+        manifest = []
         for i, avi_path in enumerate(all_avis):
             link_name = f"chunk_{i:06d}.avi"
             link_path = os.path.join(self.merged_dir, link_name)
+
+            # Find which condition this AVI belongs to
+            condition_name = None
+            for cond in self.conditions:
+                if avi_path in cond.avi_files:
+                    condition_name = cond.condition_name
+                    break
+
+            manifest.append({
+                "chunk":          link_name,
+                "chunk_index":    i,
+                "condition":      condition_name,
+                "source_avi":     avi_path,
+                "source_tif":     self._avi_to_tif(avi_path),
+            })
+
             if os.path.exists(link_path) or os.path.islink(link_path):
                 continue
             if not os.path.exists(avi_path):
@@ -197,9 +220,23 @@ class ExperimentGroup:
                 shutil.copy2(avi_path, link_path)
                 logger.debug(f"Symlink unsupported; copied {os.path.basename(avi_path)}")
 
+        # Write manifest even if links already existed
+        manifest_path = os.path.join(self.merged_dir, "chunk_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
         n_links = len([f for f in os.listdir(self.merged_dir) if f.endswith(".avi")])
         logger.info(f"Merged dir ready: {self.merged_dir}  ({n_links} AVI files)")
+        logger.info(f"Chunk manifest:   {manifest_path}")
         return self.merged_dir
+
+    def _avi_to_tif(self, avi_path: str) -> str:
+        """Best-guess reverse mapping from AVI path to source TIF path."""
+        for cond in self.conditions:
+            for tif, avi in zip(cond.tif_files, cond.avi_files):
+                if avi == avi_path:
+                    return tif
+        return ""
 
     def __repr__(self) -> str:
         return (f"ExperimentGroup(id={self.experiment_id!r}, "
