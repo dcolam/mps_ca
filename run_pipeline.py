@@ -66,7 +66,7 @@ def _setup_logging(level: str):
 
 
 def _load_config(path: str) -> Dict[str, Any]:
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:  # utf-8-sig strips Windows BOM
         cfg = json.load(f)
     return {k: v for k, v in cfg.items() if not k.startswith("_")}
 
