@@ -376,7 +376,6 @@ def run_step3b(
 
     import inspect
     sig = inspect.signature(Step3bNNDSVD._nndsvd_thread)
-    params = list(sig.parameters.keys())[1:]  # skip 'self'
 
     arg_map = {
         "n_components": n_components,
@@ -385,7 +384,13 @@ def run_step3b(
         "spatial_reg": spatial_reg,
         "chunk_size": chunk_size,
     }
-    call_args = [arg_map.get(p, None) for p in params]
+    # Use signature defaults for any params not in arg_map (e.g. subsample_n=1)
+    _empty = inspect.Parameter.empty
+    call_args = [
+        arg_map[p.name] if p.name in arg_map
+        else (p.default if p.default is not _empty else None)
+        for p in list(sig.parameters.values())[1:]  # skip 'self'
+    ]
     Step3bNNDSVD._nndsvd_thread(step, *call_args)
     _assert_step_result(controller, "step3b", "step3b: NNDSVD")
 
@@ -441,6 +446,14 @@ def run_step4b(
     if sigma is None:
         sigma = wp.get("sigma", 1.0)
 
+    # Derive component range from step3b results
+    step3b_res = controller.state.get("results", {}).get("step3b", {})
+    a_init = step3b_res.get("step3b_A_init")
+    n_comps = int(a_init.sizes["unit_id"]) if (a_init is not None and hasattr(a_init, "sizes")) else 100
+    skip_bg = True
+    start_comp = 1 if skip_bg else 0
+    end_comp = n_comps
+
     Step4bWatershedSegmentation = _import_step(
         "step4b_watershed_segmentation", "Step4bWatershedSegmentation"
     )
@@ -456,6 +469,10 @@ def run_step4b(
         "sigma": sigma,
         "min_size": min_size,
         "apply_filter": apply_filter,
+        "start_comp": start_comp,
+        "end_comp": end_comp,
+        "skip_bg": skip_bg,
+        "use_parallel": True,
     }
     call_args = [arg_map.get(p, None) for p in params]
     Step4bWatershedSegmentation._segmentation_thread(step, *call_args)
@@ -514,6 +531,8 @@ def run_step4d(
         "component_limit": component_limit,
         "use_managed_memory": use_managed_memory,
         "use_garbage_collection": use_garbage_collection,
+        "clear_cache": True,
+        "memory_efficient": True,
     }
     call_args = [arg_map.get(p, None) for p in params]
     Step4dTemporalSignals._extraction_thread(step, *call_args)
