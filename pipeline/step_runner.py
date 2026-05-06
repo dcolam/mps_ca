@@ -369,6 +369,11 @@ def run_step3b(
     Step3bNNDSVD = _import_step("step3b_svd", "Step3bNNDSVD")
     step = _new_step(controller, "3b")
 
+    # Bind methods that _nndsvd_thread calls on self
+    step._last_Y_reshaped_values = None
+    step._free_previous_run_memory = lambda: None
+    step._randomized_svd = Step3bNNDSVD._randomized_svd.__get__(step, type(step))
+
     import inspect
     sig = inspect.signature(Step3bNNDSVD._nndsvd_thread)
     params = list(sig.parameters.keys())[1:]  # skip 'self'
