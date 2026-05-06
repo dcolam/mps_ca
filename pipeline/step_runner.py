@@ -511,7 +511,7 @@ def run_step4d(
     controller: HeadlessController,
     batch_size: int = 10,
     frame_chunk_size: int = 10000,
-    component_limit: Optional[int] = None,
+    component_limit: int = 0,
     use_managed_memory: bool = True,
     use_garbage_collection: bool = True,
 ) -> None:
