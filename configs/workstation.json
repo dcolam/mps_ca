@@ -5,5 +5,10 @@
         "n_workers": 28,
         "memory_limit": "800GB",
         "dask_local_dir": "D:/DC_Ca-Data/temp/dask-scratch"
+    },
+
+    "step2a": {
+        "_comment_downsample": "2x spatial downsample avoids blosc 2GB INT32_MAX limit for 3200x2200 recordings.",
+        "downsample": {"frame": 1, "height": 2, "width": 2}
     }
 }

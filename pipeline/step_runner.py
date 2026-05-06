@@ -110,7 +110,7 @@ def _configure_dask(local_dir: Optional[str] = None) -> None:
         if local_dir:
             os.makedirs(local_dir, exist_ok=True)
             dask.config.set({"temporary-directory": local_dir})
-            logger.info(f"[Dask] temporary-directory → {local_dir}")
+            logger.info(f"[Dask] temporary-directory -> {local_dir}")
 
         # Also patch the dashboard port — dask.config has no clean key for this,
         # so we wrap LocalCluster once per process.
@@ -291,7 +291,8 @@ def run_step3a(
     # Compute crop slices from the step2e data already in state
     results = controller.state.get("results", {})
     step2e = results.get("step2e", {})
-    Y_hw = step2e.get("step2e_Y_hw_chk") or results.get("step2e_Y_hw_chk")
+    _v = step2e.get("step2e_Y_hw_chk")
+    Y_hw = _v if _v is not None else results.get("step2e_Y_hw_chk")
 
     if Y_hw is None:
         raise RuntimeError("Step 3a requires step2e_Y_hw_chk in state['results'].")
@@ -335,8 +336,10 @@ def run_step3a(
     def _get_step2e_data():
         r = controller.state.get("results", {})
         se = r.get("step2e", {})
-        hw = se.get("step2e_Y_hw_chk") or r.get("step2e_Y_hw_chk")
-        fm = se.get("step2e_Y_fm_chk") or r.get("step2e_Y_fm_chk")
+        _hw = se.get("step2e_Y_hw_chk")
+        hw = _hw if _hw is not None else r.get("step2e_Y_hw_chk")
+        _fm = se.get("step2e_Y_fm_chk")
+        fm = _fm if _fm is not None else r.get("step2e_Y_fm_chk")
         return hw, fm
 
     step.get_step2e_data = _get_step2e_data
