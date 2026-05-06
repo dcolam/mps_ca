@@ -474,7 +474,7 @@ def discover_sessions(
 # ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 _STEP_MARKERS = {
-    "step2a": ["step2a_stream_tmp.zarr"],
+    "step2a": ["step2a_varr.zarr"],
     "step2b": ["step2b_varr_ref.zarr"],
     "step2c": ["step2c_motion.zarr"],
     "step2d": ["step2d_varr_ref.zarr"],

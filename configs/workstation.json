@@ -1,0 +1,9 @@
+{
+    "_comment": "Workstation config — 30 cores / 1 TB RAM. Overrides default_config.json.",
+
+    "step1": {
+        "n_workers": 28,
+        "memory_limit": "800GB",
+        "dask_local_dir": "D:/DC_Ca-Data/temp/dask-scratch"
+    }
+}
