@@ -366,14 +366,13 @@ def run_step3b(
     """Run Step 3b: NNDSVD spatial component initialisation."""
     logger.info("[Step 3b] NNDSVD initialisation")
 
-    Step3bSvd = _import_step("step3b_svd", "Step3bSvd")
+    Step3bNNDSVD = _import_step("step3b_svd", "Step3bNNDSVD")
     step = _new_step(controller, "3b")
 
     import inspect
-    sig = inspect.signature(Step3bSvd._nndsvd_thread)
+    sig = inspect.signature(Step3bNNDSVD._nndsvd_thread)
     params = list(sig.parameters.keys())[1:]  # skip 'self'
 
-    # Build the positional argument list from known parameters
     arg_map = {
         "n_components": n_components,
         "n_power_iter": n_power_iter,
@@ -382,7 +381,7 @@ def run_step3b(
         "chunk_size": chunk_size,
     }
     call_args = [arg_map.get(p, None) for p in params]
-    Step3bSvd._nndsvd_thread(step, *call_args)
+    Step3bNNDSVD._nndsvd_thread(step, *call_args)
     _assert_step_result(controller, "step3b", "step3b: NNDSVD")
 
 
@@ -529,7 +528,7 @@ def run_step4e(
     """Run Step 4e: prepare A and C matrices for CNMF."""
     logger.info("[Step 4e] A/C initialisation")
 
-    Step4eAcInitialization = _import_step("step4e_ac_initialization", "Step4eAcInitialization")
+    Step4eAcInitialization = _import_step("step4e_ac_initialization", "Step4eACInitialization")
     step = _new_step(controller, "4e")
     Step4eAcInitialization._initialization_thread(
         step, spatial_norm, min_size, max_components, skip_bg, check_nan
