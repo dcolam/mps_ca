@@ -205,14 +205,17 @@ def run_step2b(
 def run_step2c(
     controller: HeadlessController,
     dim: str = "frame",
-    subset_mc: bool = False,
+    subset_mc=None,
 ) -> None:
     """Run Step 2c: motion estimation."""
     logger.info("[Step 2c] Motion correction")
 
+    # MPS checks `if subset_mc is not None`, so False must become None
+    subset_mc_val = None if not subset_mc else subset_mc
+
     Step2cMotionEstimation = _import_step("step2c_motion_estimation", "Step2cMotionEstimation")
     step = _new_step(controller, "2c")
-    Step2cMotionEstimation._estimate_motion_thread(step, dim, subset_mc)
+    Step2cMotionEstimation._estimate_motion_thread(step, dim, subset_mc_val)
     _assert_step_result(controller, "step2c", "step2c: motion estimation")
 
 
