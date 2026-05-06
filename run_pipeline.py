@@ -2,44 +2,41 @@
 MPS Headless Pipeline — main entry point.
 
 Usage:
-    python run_pipeline.py \\
-        --data_dir   /mnt/z/ephacoffice/DColameo/Ca_Anand_AllData \\
-        --output_dir /mnt/z/ephacoffice/DColameo/Ca_Anand_Processed \\
-        --mps_root   /mnt/c/Users/DColameo/Documents/dev/MPS_1.0.0 \\
-        --config     configs/default_config.json \\
-        --workers    4 \\
+    python run_pipeline.py \
+        --data_dir   "Z:\\ephacoffice\\DColameo\\Ca_Anand_AllData" \
+        --avi_dir    "Z:\\ephacoffice\\DColameo\\Ca_Anand_AVI" \
+        --output_dir "D:\\DC_Ca-Data\\Ca_Anand_Processed" \
+        --mps_root   "C:\\Users\\d.colameo\\dev\\MPS" \
+        --config     configs\\workstation.json \
+        --workers    28 \
         --resume
 
 Data structure expected (default --mode experiment):
     data_dir/
-      ExperimentDir/           ← one pipeline run; ROIs shared across conditions
-        1_1/                   ← recording condition (same FOV)
-          chunk001.avi ...
-        1_2/                   ← another condition
-        40X/                   ← ignored automatically (reference images)
+      ExperimentDir/           <- one pipeline run; ROIs shared across conditions
+        1_1/                   <- recording condition (same FOV)
+          chunk001.tif ...
+        1_2/                   <- another condition
+        40X/                   <- ignored automatically (reference images)
 
 Arguments:
     --data_dir    Root folder containing experiment directories.
     --output_dir  Where processed results are written.
-    --mps_root    Path to the MPS_1.0.0 source directory.
+    --mps_root    Path to the MPS source directory.
     --config      JSON config file (default: configs/default_config.json).
-    --workers     Number of experiments to process in parallel (default: 1).
+    --workers     Dask workers per experiment (overrides config step1.n_workers).
+                  All cores are given to one experiment at a time.
     --resume      Skip steps whose output zarr files already exist.
     --dry_run     Print discovered experiments and exit without processing.
     --experiment  Only process a specific experiment ID.
-    --fps         Override frame rate (Hz). Default: parsed from folder name
-                  or 4 Hz (250ms exposure).
+    --fps         Override frame rate (Hz). Default: parsed from folder name.
     --mode        'experiment' (default) or 'session' (legacy per-AVI-dir mode).
     --log_level   DEBUG, INFO, WARNING (default: INFO).
 
 Notes:
-    • Each experiment runs in its own subprocess (isolated Dask cluster, memory).
-    • With --workers N, up to N experiments run in parallel.
-    • On a 30-core / 1 TB workstation, use --workers 4 and step1.n_workers=8.
-    • AVI files must exist before running this script (see convert_to_avi.py).
-    • In experiment mode, a merged_input/ staging directory is created inside
-      each experiment's output folder — this requires no extra storage beyond
-      the symlinks themselves.
+    - Experiments are processed sequentially one at a time.
+    - All --workers cores are given to each experiment's Dask cluster.
+    - AVI files must exist before running (see convert_to_avi.py).
 """
 
 import argparse
@@ -47,7 +44,6 @@ import json
 import logging
 import os
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict
 
@@ -66,7 +62,7 @@ def _setup_logging(level: str):
 
 
 def _load_config(path: str) -> Dict[str, Any]:
-    with open(path, encoding="utf-8-sig") as f:  # utf-8-sig strips Windows BOM
+    with open(path, encoding="utf-8-sig") as f:
         cfg = json.load(f)
     return {k: v for k, v in cfg.items() if not k.startswith("_")}
 
@@ -81,35 +77,6 @@ def _merge_configs(base: Dict, override: Dict) -> Dict:
     return merged
 
 
-# ── Worker functions (run in subprocesses) ────────────────────────────────────
-
-def _run_experiment(group_data: dict, config: dict, mps_root: str, resume: bool) -> tuple:
-    """Worker for ProcessPoolExecutor — runs one ExperimentGroup."""
-    from pipeline.session_discovery import ExperimentGroup, RecordingCondition
-    from pipeline.runner import ExperimentRunner
-
-    # Reconstruct dataclasses from plain dicts (subprocess pickling)
-    conditions = [RecordingCondition(**c) for c in group_data.pop("conditions")]
-    group = ExperimentGroup(**group_data, conditions=conditions)
-
-    runner = ExperimentRunner(group=group, config=config, mps_root=mps_root, resume=resume)
-    success = runner.run()
-    return group.label, success
-
-
-def _run_session(session_data: dict, config: dict, mps_root: str, resume: bool) -> tuple:
-    """Worker for ProcessPoolExecutor — runs one VideoSession (legacy mode)."""
-    from pipeline.session_discovery import VideoSession
-    from pipeline.runner import SessionRunner
-
-    session = VideoSession(**session_data)
-    runner = SessionRunner(session=session, config=config, mps_root=mps_root, resume=resume)
-    success = runner.run()
-    return session.label, success
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
         description="MPS headless pipeline — batch ROI extraction from calcium imaging data.",
@@ -120,21 +87,20 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--mps_root",   default=DEFAULT_MPS_ROOT)
     parser.add_argument("--config",     default=str(DEFAULT_CONFIG))
-    parser.add_argument("--workers",    type=int, default=1)
+    parser.add_argument("--workers",    type=int, default=None,
+                        help="Dask workers per experiment (overrides config step1.n_workers).")
     parser.add_argument("--resume",     action="store_true")
     parser.add_argument("--dry_run",    action="store_true")
     parser.add_argument("--experiment", default=None,
-                        help="Process only this experiment ID (experiment mode).")
+                        help="Process only this experiment ID.")
     parser.add_argument("--session",    default=None,
                         help="Process only this session label (session mode).")
     parser.add_argument("--fps",        type=float, default=None,
-                        help="Override FPS for all experiments (default: parse from folder name).")
+                        help="Override FPS for all experiments.")
     parser.add_argument("--avi_dir",    default=None,
-                        help="Directory where converted AVIs live, if different from --data_dir. "
-                             "Pass the same value you used for convert_to_avi.py --output_dir.")
+                        help="Directory where converted AVIs live, if different from --data_dir.")
     parser.add_argument("--mode",       default="experiment",
-                        choices=["experiment", "session"],
-                        help="Discovery mode (default: experiment).")
+                        choices=["experiment", "session"])
     parser.add_argument("--pattern",    default=r".*\.avi$",
                         help="AVI regex pattern for session mode.")
     parser.add_argument("--log_level",  default="INFO",
@@ -158,12 +124,19 @@ def main():
     else:
         config = base_cfg
 
+    if args.workers is not None:
+        config["step1"]["n_workers"] = args.workers
+        log.info(f"Dask workers per experiment: {args.workers}")
+
     # ── Discover ──────────────────────────────────────────────────────────────
+
+    results = {}
 
     if args.mode == "experiment":
         from pipeline.session_discovery import (
             discover_experiment_groups, completed_steps_experiment,
         )
+        from pipeline.runner import ExperimentRunner
 
         log.info(f"Scanning for experiments in: {args.data_dir}")
         groups = discover_experiment_groups(
@@ -200,30 +173,16 @@ def main():
             log.info("--dry_run: exiting without processing.")
             sys.exit(0)
 
-        # Serialize for subprocess pickling
-        def _group_to_dict(g):
-            return dict(
-                experiment_dir=g.experiment_dir,
-                output_root=g.output_root,
-                experiment_id=g.experiment_id,
-                fps=g.fps,
-                conditions=[
-                    dict(
-                        directory=c.directory,
-                        condition_name=c.condition_name,
-                        tif_files=c.tif_files,
-                        avi_dir=c.avi_dir,
-                    )
-                    for c in g.conditions
-                ],
+        for group in groups:
+            runner = ExperimentRunner(
+                group=group, config=config,
+                mps_root=args.mps_root, resume=args.resume,
             )
-
-        items = [(g.label, _group_to_dict(g)) for g in groups]
-        worker_fn = _run_experiment
+            results[group.label] = runner.run()
 
     else:
-        # Legacy session mode
         from pipeline.session_discovery import discover_sessions, completed_steps
+        from pipeline.runner import SessionRunner
 
         log.info(f"Scanning for AVI sessions in: {args.data_dir}")
         sessions = discover_sessions(
@@ -251,42 +210,12 @@ def main():
             log.info("--dry_run: exiting without processing.")
             sys.exit(0)
 
-        def _session_to_dict(s):
-            return dict(
-                input_dir=s.input_dir,
-                output_root=s.output_root,
-                animal_id=s.animal_id,
-                session_id=s.session_id,
-                video_files=s.video_files,
+        for session in sessions:
+            runner = SessionRunner(
+                session=session, config=config,
+                mps_root=args.mps_root, resume=args.resume,
             )
-
-        items = [(s.label, _session_to_dict(s)) for s in sessions]
-        worker_fn = _run_session
-
-    # ── Run ───────────────────────────────────────────────────────────────────
-
-    results = {}
-    n_workers = min(args.workers, len(items))
-
-    if n_workers == 1:
-        for label, data in items:
-            _, ok = worker_fn(data, config, args.mps_root, args.resume)
-            results[label] = ok
-    else:
-        log.info(f"Processing {len(items)} item(s) with {n_workers} parallel workers")
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = {
-                pool.submit(worker_fn, data, config, args.mps_root, args.resume): label
-                for label, data in items
-            }
-            for future in as_completed(futures):
-                label = futures[future]
-                try:
-                    _, ok = future.result()
-                    results[label] = ok
-                except Exception as exc:
-                    log.error(f"{label}: {exc}")
-                    results[label] = False
+            results[session.label] = runner.run()
 
     # ── Summary ───────────────────────────────────────────────────────────────
 
