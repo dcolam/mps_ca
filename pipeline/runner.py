@@ -237,7 +237,7 @@ class SessionRunner:
                 ctrl,
                 batch_size=c["step4d"]["batch_size"],
                 frame_chunk_size=c["step4d"]["frame_chunk_size"],
-                component_limit=c["step4d"].get("component_limit"),
+                component_limit=c["step4d"].get("component_limit", 0),
                 use_managed_memory=c["step4d"]["use_managed_memory"],
                 use_garbage_collection=c["step4d"]["use_garbage_collection"],
             )
@@ -250,7 +250,7 @@ class SessionRunner:
                 ctrl,
                 spatial_norm=c["step4e"]["spatial_norm"],
                 min_size=c["step4e"]["min_size"],
-                max_components=c["step4e"].get("max_components"),
+                max_components=c["step4e"].get("max_components", 0),
                 skip_bg=c["step4e"]["skip_bg"],
                 check_nan=c["step4e"]["check_nan"],
             )
@@ -261,7 +261,7 @@ class SessionRunner:
         if not self._skip_step("step4f"):
             sr.run_step4f(
                 ctrl,
-                max_components=c["step4f"].get("max_components"),
+                max_components=c["step4f"].get("max_components", 0),
                 check_nan=c["step4f"]["check_nan"],
                 check_empty=c["step4f"]["check_empty"],
                 check_flat=c["step4f"]["check_flat"],
@@ -277,7 +277,7 @@ class SessionRunner:
                 spatial_overlap_threshold=c["step4g"]["spatial_overlap_threshold"],
                 max_size=c["step4g"]["max_size"],
                 input_type=c["step4g"]["input_type"],
-                max_components=c["step4g"].get("max_components"),
+                max_components=c["step4g"].get("max_components", 0),
             )
 
         logger.info(f"[{self.session.label}] Pipeline finished. ROIs in {self.session.cache_dir}")
