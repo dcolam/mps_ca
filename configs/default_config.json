@@ -81,7 +81,7 @@
     "step4d": {
         "batch_size": 10,
         "frame_chunk_size": 10000,
-        "component_limit": null,
+        "component_limit": 0,
         "use_managed_memory": true,
         "use_garbage_collection": true
     },
@@ -89,13 +89,13 @@
     "step4e": {
         "spatial_norm": "max",
         "min_size": 1,
-        "max_components": null,
+        "max_components": 0,
         "skip_bg": true,
         "check_nan": true
     },
 
     "step4f": {
-        "max_components": null,
+        "max_components": 0,
         "check_nan": true,
         "check_empty": true,
         "check_flat": true
