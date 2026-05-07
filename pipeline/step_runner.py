@@ -83,10 +83,12 @@ def run_step1(
     controller.state["dataset_output_path"] = dataset_output_path
     controller.state["cache_path"] = cache_path
 
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    # Don't limit BLAS threads in the main process — the SVD in step3b needs them.
+    # Per-worker thread limits are handled via Dask worker env below.
     os.environ["CACHE_PATH"] = cache_path
+
+    _configure_dask(dask_local_dir)
+    _ensure_dask_cluster(n_workers, memory_limit)
 
     logger.info(f"[Step 1] cache_path = {cache_path}")
 
@@ -136,6 +138,32 @@ def _configure_dask(local_dir: Optional[str] = None) -> None:
         logger.info("[Dask] LocalCluster patched — dashboard_address=:0")
     except Exception as exc:
         logger.warning(f"[Dask] configuration failed: {exc}")
+
+
+def _ensure_dask_cluster(n_workers: int = 8, memory_limit: str = "200GB") -> None:
+    """Start a Dask LocalCluster+Client if none is running yet.
+
+    Called from run_step1 so the cluster is always available even when step2a
+    is skipped (resume mode). step2a may create its own cluster later — that's
+    fine, the new Client becomes the default and the old one is closed.
+    """
+    try:
+        from dask.distributed import Client, LocalCluster
+        try:
+            Client.current()
+            logger.info(f"[Dask] Existing client found — reusing.")
+            return
+        except Exception:
+            pass
+        cluster = LocalCluster(
+            n_workers=n_workers,
+            memory_limit=memory_limit,
+            threads_per_worker=1,
+        )
+        Client(cluster)
+        logger.info(f"[Dask] Started LocalCluster: {n_workers} workers, {memory_limit} each.")
+    except Exception as exc:
+        logger.warning(f"[Dask] Could not start cluster: {exc}")
 
 
 # ── Step 2a: Video Loading ─────────────────────────────────────────────────────
