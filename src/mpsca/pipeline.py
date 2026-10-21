@@ -1,0 +1,176 @@
+"""Processing steps that read from and write to an experiment store.
+
+Each step stores its result plus the parameters used, so the GUI and the CLI share
+one implementation and every result can be traced back to its settings.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+import pandas as pd
+from skimage import measure
+
+from .analysis import AnalysisParams, AnalysisResult, analyse
+from .io.store import ExperimentStore
+from .preprocess import compute_projections, detect_low_signal, segmentation_frames
+from .segment import ClassicParams, SweepResult, classic_sweep
+from .traces import DffParams, compute_dff, estimate_offset, extract_traces
+
+Progress = Callable[[float], None] | None
+PROJECTIONS = ("mean", "max", "std", "corr")
+
+
+def fps_of(store: ExperimentStore) -> float:
+    return float(store.meta.get("fps") or store.params("convert").get("target_fps", 1.0))
+
+
+# ---- bad frames & projections ----------------------------------------------
+def set_bad_frames(store: ExperimentStore, thresh: float) -> tuple[np.ndarray, float]:
+    frames = store.read_frames()
+    is_bad, cutoff = detect_low_signal(frames["frame_mean"].to_numpy(), thresh)
+    store.update_frames_column("is_bad", is_bad)
+    store.set_params("bad_frames", {"low_signal_thresh": thresh, "cutoff": cutoff})
+    return is_bad, cutoff
+
+
+def run_projections(store: ExperimentStore, progress: Progress = None) -> dict[str, np.ndarray]:
+    idx = segmentation_frames(store.read_frames())
+    proj = compute_projections(store.movie, idx, progress=progress)
+    for name, img in proj.items():
+        store.save_array(f"projections/{name}", img, n_frames=int(len(idx)))
+    store.set_params("projections", {"n_frames": int(len(idx))})
+    store.log(f"projections over {len(idx)} frames")
+    return proj
+
+
+def load_projections(store: ExperimentStore) -> dict[str, np.ndarray]:
+    return {n: store.load_array(f"projections/{n}") for n in PROJECTIONS
+            if store.has(f"projections/{n}")}
+
+
+# ---- labels -----------------------------------------------------------------
+def save_labels(store: ExperimentStore, labels: np.ndarray, name: str, **info) -> None:
+    """Store a label image under ``labels/<name>`` and make it the active one."""
+    store.save_array(f"labels/{name}", np.asarray(labels, dtype=np.int32), **info)
+    store.group.attrs["active_labels"] = name
+    store.log(f"labels '{name}': {int(np.max(labels))} ROIs")
+
+
+def active_labels(store: ExperimentStore) -> tuple[str, np.ndarray] | None:
+    name = store.group.attrs.get("active_labels")
+    if name and store.has(f"labels/{name}"):
+        return name, store.load_array(f"labels/{name}")
+    return None
+
+
+def run_classic(store: ExperimentStore, params: ClassicParams | None = None) -> SweepResult:
+    p = params or ClassicParams()
+    proj = load_projections(store)
+    sweep = classic_sweep(proj["mean"], proj["std"], proj["max"], p)
+    save_labels(store, sweep.labels, "classic", method="classic", best=list(sweep.best),
+                threshold=sweep.threshold, params=asdict(p))
+    store.set_params("segment", {"method": "classic", **asdict(p)})
+    return sweep
+
+
+def run_cellpose(store: ExperimentStore, channels: list[str], params=None) -> np.ndarray:
+    from .segment.cellpose_seg import CellposeParams, build_input, run_cellpose as _run
+
+    p = params or CellposeParams()
+    labels = _run(build_input(load_projections(store), channels), p)
+    save_labels(store, labels, "cellpose", method="cellpose", channels=channels, params=asdict(p))
+    store.set_params("segment", {"method": "cellpose", "channels": channels, **asdict(p)})
+    return labels
+
+
+# ---- traces -----------------------------------------------------------------
+def run_traces(store: ExperimentStore, params: DffParams | None = None,
+               progress: Progress = None) -> dict[str, np.ndarray]:
+    p = DffParams(**asdict(params or DffParams()))
+    act = active_labels(store)
+    if act is None:
+        raise ValueError("no ROIs yet: run a segmentation or save edited labels first")
+    if p.offset is None:
+        proj = load_projections(store)
+        p.offset = round(estimate_offset(proj["mean"]), 1) if "mean" in proj else 0.0
+    name, labels = act
+    frames = store.read_frames()
+    F = extract_traces(store.movie, labels, progress=progress)
+    time_s = frames["time_s"].to_numpy()
+    dff, F0 = compute_dff(F, time_s, fps_of(store), frames["is_bad"].to_numpy(), p)
+    props = measure.regionprops(labels)
+    centroids = np.array([rp.centroid for rp in props]).reshape(-1, 2)
+    areas = np.array([rp.area for rp in props])
+    for key, arr in {"F": F, "F0": F0, "dff": dff, "centroids": centroids, "areas": areas,
+                     "time_s": time_s}.items():
+        store.save_array(f"traces/{key}", arr, labels=name)
+    store.set_params("traces", {"labels": name, **asdict(p)})
+    store.log(f"traces for {F.shape[0]} ROIs from labels '{name}'")
+    return {"F": F, "F0": F0, "dff": dff, "centroids": centroids, "time_s": time_s}
+
+
+def load_traces(store: ExperimentStore) -> dict[str, np.ndarray] | None:
+    if not store.has("traces/dff"):
+        return None
+    return {k: store.load_array(f"traces/{k}") for k in ("F", "F0", "dff", "centroids", "areas", "time_s")}
+
+
+# ---- analysis & export ---------------------------------------------------------
+def run_analysis(store: ExperimentStore, params: AnalysisParams | None = None) -> AnalysisResult:
+    tr = load_traces(store)
+    if tr is None:
+        raise ValueError("no traces yet: extract traces first")
+    res = analyse(tr["dff"], tr["time_s"], tr["centroids"], store.read_frames(), fps_of(store), params)
+    store.group.attrs["analysis_summary"] = json.loads(json.dumps(res.summary, default=float))
+    store.set_params("analysis", asdict(res.params))
+    store.log(f"analysis: {res.summary['n_bursts']} bursts, mean r={res.summary['mean_corr']}")
+    return res
+
+
+def default_output_dir(store: ExperimentStore) -> Path:
+    p = store.path
+    return p.with_name(p.name.replace(".mpsca.zarr", "") + "_results")
+
+
+def export_results(store: ExperimentStore, out_dir: str | Path | None = None,
+                   res: AnalysisResult | None = None, figures: bool = True) -> Path:
+    """Write CSV tables (and PNG figures) next to the store."""
+    from .analysis import figures as figs
+
+    out = Path(out_dir) if out_dir else default_output_dir(store)
+    out.mkdir(parents=True, exist_ok=True)
+    frames = store.read_frames()
+    frames.to_csv(out / "frames.csv", index_label="frame")
+    tr = load_traces(store)
+    if tr is not None:
+        cols = [f"cell_{i + 1}" for i in range(tr["dff"].shape[0])]
+        for key in ("F", "dff"):
+            df = pd.DataFrame(tr[key].T, columns=cols)
+            df.insert(0, "time_s", tr["time_s"])
+            df.to_csv(out / f"{key}.csv", index=False)
+        pd.DataFrame({"cell_id": np.arange(1, len(tr["areas"]) + 1),
+                      "y_px": tr["centroids"][:, 0].round(2), "x_px": tr["centroids"][:, 1].round(2),
+                      "area_px": tr["areas"]}).to_csv(out / "cells.csv", index=False)
+    if res is not None:
+        pd.DataFrame(res.bursts).to_csv(out / "bursts.csv", index=False)
+        (out / "summary.json").write_text(json.dumps(
+            {"experiment": store.meta, **res.summary}, indent=2, default=float))
+    if figures:
+        proj = load_projections(store)
+        act = active_labels(store)
+        if res is not None and tr is not None and "mean" in proj and act is not None:
+            for name, fig in {
+                "01_overview": figs.overview(proj["mean"], act[1], store.meta.get("name", "")),
+                "02_dff": figs.dff_heatmap(tr["dff"], tr["time_s"], res.epochs, res.order),
+                "03_correlation": figs.correlation(res),
+                "04_proximity": figs.proximity(res),
+                "05_bursts": figs.bursts(res, tr["time_s"]),
+                "06_pca": figs.pca(res, proj["mean"], tr["centroids"]),
+            }.items():
+                fig.savefig(out / f"{name}.png", dpi=120)
+    store.log(f"exported results to {out}")
+    return out

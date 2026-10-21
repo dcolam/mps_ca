@@ -1,4 +1,86 @@
-# MPS Calcium Imaging Pipeline
+# mpsca: calcium imaging GUI for Min6 recordings
+
+A napari GUI (plus a command line for batch work) that takes Micro-Manager recordings
+from raw TIFFs to ROIs, ΔF/F traces, burst statistics and WT/KO comparisons.
+
+## Install (Windows workstation)
+
+From the repository folder:
+
+```
+conda create -n mpsca python=3.12
+conda activate mpsca
+pip install -e ".[gui,cellpose]"
+```
+
+With an NVIDIA GPU, switch PyTorch to its CUDA build afterwards for much faster Cellpose
+(take the exact index URL for your CUDA version from <https://pytorch.org/get-started/locally/>):
+
+```
+pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
+Without it everything works on the CPU (Cellpose then takes about a minute per image).
+
+Start the GUI with `mpsca gui`, or open napari and choose *Plugins → Calcium pipeline*.
+
+## Workflow (one tab per step)
+
+1. **Import**: *Add folder…* (each subfolder = one condition, `40X` reference folders
+   are skipped) or *Load from Excel…* (`Application_period.xlsx`). Edit conditions and
+   which blocks are used for segmentation. Remove files you do not want.
+   *Scan files* reads only the headers: frame counts per block, frame size, camera
+   binning, real frame rate and anything odd (truncated files, counts that differ from
+   the Excel). **Whenever spatial binning is needed you are asked**: blocks of different
+   resolution, or recordings made without camera binning. The default puts everything on
+   the camera-2×2 grid (2200×3200 → 1100×1600, camera-binned blocks untouched), so all
+   experiments share one pixel size; the *Factor* column can be changed per block.
+   *Convert* writes a working copy `<experiment>.mpsca.zarr` (time-averaged to the
+   working fps, spatially binned as chosen). Put it on a local SSD.
+2. **Preprocess**: bad-frame threshold (bad frames are flagged, never deleted), then
+   projections: mean, max, std and the *local correlation* image, which shows active
+   cells clearly in noisy recordings.
+3. **Segment**: Cellpose (default input mean + correlation; measure the cell diameter by
+   drawing a line) or the classic threshold sweep of the original notebook. Correct
+   ROIs directly in the *ROIs* layer, then *Save ROIs*.
+4. **Traces**: F and ΔF/F per ROI. The baseline is computed separately per recording
+   block, so it never spans a pause. *Estimate offset* subtracts the camera dark level
+   (≈100 counts here; without it ΔF/F is strongly compressed). Click an ROI to see its trace.
+5. **Analysis**: correlation, proximity vs co-activity, spikes and population bursts per
+   condition, PCA. *Robust noise (MAD)* is recommended for active recordings: the
+   notebook's rolling-RMS threshold rises with the activity itself. *Export* writes CSV
+   tables and PNG figures.
+6. **Summary**: add analysed experiments and compare them by genotype.
+
+Every step stores its parameters in the experiment's `.mpsca.zarr`, so results are traceable.
+
+## Command line
+
+```
+mpsca scan    --folder Z:\...\05_11_25_Min6_C23_KO_Binning_2_2_250ms_Exp1
+mpsca convert --folder Z:\...\<experiment> --out-dir D:\mpsca_data [--accept-proposal | --block-factors 0:2,1:2,2:2,3:1]
+mpsca convert --excel Application_period.xlsx --base-dir Z:\...\Ca_Anand_AllData --sheet "Min6 KO Exp1" --out-dir D:\mpsca_data
+mpsca process D:\mpsca_data\<experiment>.mpsca.zarr --method cellpose --diameter 12
+mpsca info    D:\mpsca_data\<experiment>.mpsca.zarr
+```
+
+`convert` stops whenever spatial binning would be applied (block sizes differ, or blocks are
+below the common `--grid`, default camera 2×2) unless `--accept-proposal` or
+`--block-factors` is given.
+
+## Development
+
+```
+pip install -e .[gui,cellpose,dev] pytest-qt
+pytest                      # GUI tests need napari + pytest-qt; Cellpose test downloads the model once
+```
+
+---
+
+# Legacy: MPS headless pipeline
+
+The material below documents the earlier MPS-based batch pipeline (`pipeline/`,
+`run_pipeline.py`, `convert_to_avi.py`), which `mpsca` replaces.
 
 Headless batch pipeline for automated ROI extraction from calcium imaging recordings using [Miniscope Processing Suite (MPS)](https://github.com/your-mps-link).
 

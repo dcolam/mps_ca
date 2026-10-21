@@ -1,0 +1,10 @@
+name: mpsca
+display_name: mpsca calcium pipeline
+contributions:
+  commands:
+    - id: mpsca.main_widget
+      python_name: mpsca.gui._main:MainWidget
+      title: Calcium pipeline
+  widgets:
+    - command: mpsca.main_widget
+      display_name: Calcium pipeline
