@@ -16,9 +16,9 @@ import pandas as pd
 
 from .._progress import compute_with_progress
 from ..preprocess import bin_movie, detect_low_signal
-from .metadata import ExperimentMeta
+from .metadata import Recording
 from .mm_tiff import open_tiff_lazy
-from .scan import ScanReport, scan_experiment
+from .scan import ScanReport, scan_recording
 from .store import ExperimentStore
 
 log = logging.getLogger(__name__)
@@ -49,8 +49,9 @@ class ConvertParams:
 
     def factors_for(self, report: ScanReport) -> dict[int, int]:
         factors = report.proposed_factors(self.spatial_binning, self.target_camera_binning)
-        if self.block_spatial_factors:
-            factors.update({int(k): int(v) for k, v in self.block_spatial_factors.items()})
+        overrides = self.block_spatial_factors or report.recording.block_factors
+        if overrides:
+            factors.update({int(k): int(v) for k, v in overrides.items() if int(k) in factors})
         return factors
 
 
@@ -109,24 +110,26 @@ def frame_times(report: ScanReport, fps: float,
     return [ts - t0 for ts in out], warnings
 
 
-def convert_experiment(
-    meta: ExperimentMeta,
+def convert_recording(
+    rec: Recording,
     out_path: str | Path,
     params: ConvertParams | None = None,
     overwrite: bool = False,
     progress: Callable[[float], None] | None = None,
     report: ScanReport | None = None,
 ) -> ExperimentStore:
-    """Bin every resolved file of ``meta`` and write the working movie plus frame table.
+    """Bin every included file of ``rec`` and write the working movie plus frame table.
 
-    ``report`` is the result of :func:`scan_experiment`; it is computed if not given.
+    ``report`` is the result of :func:`scan_recording`; it is computed if not given.
+    Spatial factors: ``params.block_spatial_factors``, else ``rec.block_factors``, else
+    the proposal of the scan.
     """
     params = params or ConvertParams()
     t = params.temporal_factor
     if report is None:
-        report = scan_experiment(meta, params.source_fps)
+        report = scan_recording(rec, params.source_fps)
     if not report.files:
-        raise ValueError(f"{meta.name}: no input files resolved on disk")
+        raise ValueError(f"{rec.name}: no input files found on disk")
     factors = params.factors_for(report)
     out_shapes = report.output_shape(factors)
     if len(out_shapes) > 1:
@@ -144,8 +147,7 @@ def convert_experiment(
             "source_file": fe.filename,
             "source_frame": src_idx.astype(np.int32),
             "block": np.int16(fe.block),
-            "application": fe.application or "",
-            "phase": fe.phase or "",
+            "condition": fe.condition or f"block {fe.block}",
             "use_for_seg": fe.use_for_seg,
             "time_s": ts[src_idx],
             "camera_binning": np.int8(fs.info.camera_binning or 0),
@@ -179,13 +181,18 @@ def convert_experiment(
             if fs.info.pixel_size_um:
                 pixel = fs.info.pixel_size_um * factors[fs.entry.block]
                 break
-    store.set_meta(name=meta.name, sheet=meta.sheet, genotype=meta.genotype,
+    blocks = {}
+    for fs in report.files:
+        b = blocks.setdefault(fs.entry.block, {"block": fs.entry.block, "condition": fs.entry.condition,
+                                               "info": fs.entry.info, "files": []})
+        b["files"].append(fs.entry.relpath)
+    store.set_meta(name=rec.name, description=rec.description, blocks=list(blocks.values()),
                    source_files=[str(fs.entry.path) for fs in report.files],
                    raw_shapes=[[fs.n_frames, fs.height, fs.width] for fs in report.files],
                    camera_binning=sorted({fs.info.camera_binning for fs in report.files
                                           if fs.info.camera_binning}),
                    pixel_size_um=pixel, fps=params.target_fps,
-                   missing_files=[fe.filename for fe in meta.files if fe.path is None],
+                   missing_files=rec.missing,
                    frame_warnings=warnings)
     p = asdict(params)
     p["block_spatial_factors"] = {str(k): v for k, v in factors.items()}

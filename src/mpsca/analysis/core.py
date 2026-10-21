@@ -56,19 +56,17 @@ class AnalysisResult:
 
 
 def epochs_from_frames(frames: pd.DataFrame, fps: float) -> list[dict]:
-    """Contiguous runs of the same (application, phase), with start/end times and colours."""
+    """Contiguous runs of the same condition, with start/end times and colours."""
     t = frames["time_s"].to_numpy()
-    keys = list(zip(frames["application"].astype(str), frames["phase"].astype(str)))
+    keys = frames["condition"].astype(str).tolist()
     out, colours = [], {}
     start = 0
     for i in range(1, len(keys) + 1):
         if i == len(keys) or keys[i] != keys[start]:
-            app, phase = keys[start]
-            colours.setdefault(app, EPOCH_PALETTE[len(colours) % len(EPOCH_PALETTE)])
-            out.append({"application": app, "phase": phase,
-                        "label": f"{app} ({phase})" if phase else app,
-                        "start_s": float(t[start]), "end_s": float(t[i - 1] + 1 / fps),
-                        "first_frame": start, "last_frame": i - 1, "color": colours[app]})
+            label = keys[start]
+            colours.setdefault(label, EPOCH_PALETTE[len(colours) % len(EPOCH_PALETTE)])
+            out.append({"label": label, "start_s": float(t[start]), "end_s": float(t[i - 1] + 1 / fps),
+                        "first_frame": start, "last_frame": i - 1, "color": colours[label]})
             start = i
     return out
 

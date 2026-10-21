@@ -8,7 +8,7 @@ Layout::
       projections/...   (later steps)
       labels/...        (later steps)
       traces/...        (later steps)
-    attrs: format_version, experiment (name, genotype, ...), params (per step), log
+    attrs: format_version, experiment (name, description, blocks, ...), params (per step), log
 """
 from __future__ import annotations
 
@@ -61,7 +61,10 @@ class ExperimentStore:
     # ---- metadata ---------------------------------------------------------
     @property
     def meta(self) -> dict:
-        return dict(self.group.attrs.get("experiment", {}))
+        meta = dict(self.group.attrs.get("experiment", {}))
+        if "description" not in meta and meta.get("genotype"):  # written before version 0.2
+            meta["description"] = {"sheet": meta.get("sheet"), "genotype": meta["genotype"]}
+        return meta
 
     def set_meta(self, **values) -> None:
         self.group.attrs["experiment"] = {**self.meta, **values}
@@ -140,7 +143,11 @@ class ExperimentStore:
             if col in categories:
                 data = pd.Categorical.from_codes(data, categories=categories[col])
             cols[col] = data
-        return pd.DataFrame(cols)
+        df = pd.DataFrame(cols)
+        if "condition" not in df and "application" in df:  # stores written before version 0.2
+            app, phase = df["application"].astype(str), df["phase"].astype(str)
+            df["condition"] = pd.Categorical(np.where(phase != "", app + " · " + phase, app))
+        return df
 
     def update_frames_column(self, col: str, values) -> None:
         df = self.read_frames()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qtpy.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QListWidget, QMessageBox,
+from qtpy.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMessageBox,
                             QProgressBar, QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import pipeline
@@ -70,16 +70,23 @@ class AnalysisTab(QWidget):
         self.btn_export.clicked.connect(self.export)
         session.store_changed.connect(self._restore_params)
 
+    def read_settings(self, s):
+        self.form.set_value(s.analysis)
+
+    def write_settings(self, s):
+        s.analysis = self.form.value()
+
     def _restore_params(self):
         self.result = None
         self.btn_export.setEnabled(False)
         p = self.session.store.params("analysis")
-        if p:
+        if p and self.session.project is None:
             self.form.set_value(p)
 
     def run(self):
         if self.session.store is None:
             return
+        self.session.pull_settings()
         self.runner.run(pipeline.run_analysis, self.session.store, self.form.value(), with_progress=False,
                         done=self._show, message="Analysing…", lock=[self.btn_run])
 
@@ -117,59 +124,95 @@ class AnalysisTab(QWidget):
 
 
 class SummaryTab(QWidget):
-    """Compare analysed experiments (e.g. WT vs KO)."""
+    """Compare analysed recordings, grouped by any description field."""
 
     def __init__(self, session: Session, parent=None):
         super().__init__(parent)
         self.session = session
         self.df = None
         lay = QVBoxLayout(self)
-        lay.addWidget(hint("Add analysed experiments (.mpsca.zarr folders) to compare them by "
-                           "genotype. Genotype comes from the Import step."))
+        lay.addWidget(hint("Compare analysed recordings. 'Project recordings' adds every analysed "
+                           "recording of the open project; recordings can also be added one by one "
+                           "(.mpsca.zarr folders). Group them by any description field."))
         self.list = QListWidget()
         self.list.setMaximumHeight(130)
         lay.addWidget(self.list)
         row = QHBoxLayout()
+        b_proj = QPushButton("Project recordings")
         b_add = QPushButton("Add…")
-        b_cur = QPushButton("Add current")
         b_rm = QPushButton("Remove")
-        self.btn_make = QPushButton("Compare")
-        self.btn_csv = QPushButton("Save table…")
-        for b in (b_add, b_cur, b_rm, self.btn_make, self.btn_csv):
+        for b in (b_proj, b_add, b_rm):
             row.addWidget(b)
         lay.addLayout(row)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Group by"))
+        self.cb_group = QComboBox()
+        self.cb_group.setMinimumWidth(140)
+        row2.addWidget(self.cb_group)
+        self.btn_make = QPushButton("Compare")
+        self.btn_csv = QPushButton("Save table…")
+        row2.addWidget(self.btn_make)
+        row2.addWidget(self.btn_csv)
+        row2.addStretch()
+        lay.addLayout(row2)
         self.tabs = QTabWidget()
         self.p_main, self.p_epoch = FigurePanel(), FigurePanel()
-        self.tabs.addTab(self.p_main, "By genotype")
+        self.tabs.addTab(self.p_main, "By group")
         self.tabs.addTab(self.p_epoch, "Bursts per condition")
         lay.addWidget(self.tabs)
         self.status = QLabel("")
         lay.addWidget(self.status)
+        b_proj.clicked.connect(self.add_project)
         b_add.clicked.connect(self._add)
-        b_cur.clicked.connect(lambda: self.session.store and self.add(self.session.store.path))
         b_rm.clicked.connect(lambda: self.list.takeItem(self.list.currentRow()))
         self.btn_make.clicked.connect(self.compare)
         self.btn_csv.clicked.connect(self._save_csv)
+        self.cb_group.currentIndexChanged.connect(self._redraw)
 
     def add(self, path):
         path = str(path)
         if path not in [self.list.item(i).text() for i in range(self.list.count())]:
             self.list.addItem(path)
 
+    def add_project(self):
+        proj = self.session.project
+        if proj is None:
+            self.status.setText("Open or create a project first.")
+            return
+        for rec in proj.select():
+            if proj.status(rec) == "analysed":
+                self.add(proj.store_path(rec))
+        self.status.setText(f"{self.list.count()} analysed recordings.")
+
     def _add(self):
-        d = QFileDialog.getExistingDirectory(self, "Add experiment (.mpsca.zarr)", settings().value("out_dir", ""))
+        d = QFileDialog.getExistingDirectory(self, "Add recording (.mpsca.zarr)", settings().value("out_dir", ""))
         if d:
             self.add(d)
 
     def compare(self):
         paths = [self.list.item(i).text() for i in range(self.list.count())]
-        self.df = summary.collect(paths)
+        proj = self.session.project
+        desc = {str(proj.store_path(r)): r.description for r in proj.recordings} if proj else None
+        self.df = summary.collect(paths, desc)
         if self.df.empty:
-            self.status.setText("None of these experiments has been analysed yet.")
+            self.status.setText("None of these recordings has been analysed yet.")
             return
-        self.p_main.set_figure(summary.figure(self.df))
+        current = self.cb_group.currentText()
+        self.cb_group.blockSignals(True)
+        self.cb_group.clear()
+        self.cb_group.addItems(["(none)", *summary.description_columns(self.df)])
+        if current:
+            self.cb_group.setCurrentText(current)
+        self.cb_group.blockSignals(False)
+        self._redraw()
+        self.status.setText(f"{len(self.df)} recordings")
+
+    def _redraw(self):
+        if self.df is None or self.df.empty:
+            return
+        group = self.cb_group.currentText()
+        self.p_main.set_figure(summary.figure(self.df, None if group in ("", "(none)") else group))
         self.p_epoch.set_figure(summary.epoch_figure(self.df))
-        self.status.setText(f"{len(self.df)} experiments")
 
     def _save_csv(self):
         if self.df is None:

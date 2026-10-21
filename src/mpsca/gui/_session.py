@@ -1,4 +1,4 @@
-"""The open experiment store and the napari layers that show it."""
+"""The open project, the recording being worked on, and the napari layers that show it."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +8,7 @@ from qtpy.QtCore import QObject, QSettings, Signal
 
 from .. import pipeline
 from ..io.store import ExperimentStore
+from ..pipeline import PipelineSettings
 
 ROI_LAYER = "ROIs"
 MOVIE_LAYER = "movie"
@@ -18,6 +19,7 @@ def settings() -> QSettings:
 
 
 class Session(QObject):
+    project_changed = Signal()
     store_changed = Signal()
     labels_changed = Signal()
     traces_changed = Signal()
@@ -25,7 +27,34 @@ class Session(QObject):
     def __init__(self, viewer):
         super().__init__()
         self.viewer = viewer
+        self.project = None             # mpsca.project.Project
         self.store: ExperimentStore | None = None
+        self._settings = PipelineSettings()
+        self.settings_tabs: list = []   # tabs with read_settings(s) / write_settings(s)
+
+    # ---- project and the processing settings shared by all recordings ---------------
+    def set_project(self, project) -> None:
+        self.project = project
+        settings().setValue("last_project", str(project.output_dir))
+        self.push_settings()
+        self.project_changed.emit()
+
+    @property
+    def settings(self) -> PipelineSettings:
+        return self.project.settings if self.project is not None else self._settings
+
+    def pull_settings(self) -> PipelineSettings:
+        """Collect the current values of every tab into the shared settings (and save them)."""
+        s = self.settings
+        for tab in self.settings_tabs:
+            tab.write_settings(s)
+        if self.project is not None:
+            self.project.save()
+        return s
+
+    def push_settings(self) -> None:
+        for tab in self.settings_tabs:
+            tab.read_settings(self.settings)
 
     # ---- store ------------------------------------------------------------
     def open_store(self, path: str | Path) -> ExperimentStore:

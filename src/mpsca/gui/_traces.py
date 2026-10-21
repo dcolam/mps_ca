@@ -68,9 +68,15 @@ class TracesTab(QWidget):
         session.store_changed.connect(self._restore_params)
         session.viewer.mouse_drag_callbacks.append(self._on_click)
 
+    def read_settings(self, s):
+        self.form.set_value(s.traces)
+
+    def write_settings(self, s):
+        s.traces = self.form.value()
+
     def _restore_params(self):
         p = self.session.store.params("traces")
-        if p:
+        if p and self.session.project is None:
             self.form.set_value(p)  # shows the offset actually used last time
 
     def estimate(self):
@@ -98,6 +104,7 @@ class TracesTab(QWidget):
                 labels = filter_area(self.session.roi_layer().data, 1)
                 pipeline.save_labels(store, labels, "edited", method="edited")
                 self.session.show_labels(labels)
+        self.session.pull_settings()
         self.runner.run(pipeline.run_traces, store, self.form.value(), done=lambda _: self.load(),
                         message="Extracting traces…", lock=[self.btn_run])
 

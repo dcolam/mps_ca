@@ -1,7 +1,9 @@
-# mpsca: calcium imaging GUI for Min6 recordings
+# mpsca: calcium imaging GUI
 
-A napari GUI (plus a command line for batch work) that takes Micro-Manager recordings
-from raw TIFFs to ROIs, ΔF/F traces, burst statistics and WT/KO comparisons.
+A napari GUI (plus a command line for long batch runs) that takes Micro-Manager recordings
+from raw TIFFs to ROIs, ΔF/F traces, burst statistics and group comparisons. Nothing
+about the experiments is built in: recordings are found by file pattern and described
+by an optional Excel file or by columns you add yourself.
 
 ## Install (Windows workstation)
 
@@ -13,60 +15,90 @@ conda activate mpsca
 pip install -e ".[gui,cellpose]"
 ```
 
-With an NVIDIA GPU, switch PyTorch to its CUDA build afterwards for much faster Cellpose
-(take the exact index URL for your CUDA version from <https://pytorch.org/get-started/locally/>):
+With an NVIDIA GPU, replace the CPU PyTorch by a CUDA build (no admin rights or CUDA
+install needed, the driver is enough; pick the `cuXXX` at or below the "CUDA Version"
+shown by `nvidia-smi`):
 
 ```
-pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip uninstall -y torch torchvision
+pip install --isolated torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Without it everything works on the CPU (Cellpose then takes about a minute per image).
+(`--isolated` ignores pip config files, e.g. an unreachable extra package index.)
+Without a GPU everything works on the CPU; Cellpose then takes a few minutes per
+recording. When the GPU is full (shared machine), Cellpose falls back to the CPU.
 
-Start the GUI with `mpsca gui`, or open napari and choose *Plugins → Calcium pipeline*.
+Start the GUI with `mpsca gui` (or `mpsca gui D:\mpsca_data` to reopen a project).
 
-## Workflow (one tab per step)
+## Workflow
 
-1. **Import**: *Add folder…* (each subfolder = one condition, `40X` reference folders
-   are skipped) or *Load from Excel…* (`Application_period.xlsx`). Edit conditions and
-   which blocks are used for segmentation. Remove files you do not want.
-   *Scan files* reads only the headers: frame counts per block, frame size, camera
-   binning, real frame rate and anything odd (truncated files, counts that differ from
-   the Excel). **Whenever spatial binning is needed you are asked**: blocks of different
-   resolution, or recordings made without camera binning. The default puts everything on
-   the camera-2×2 grid (2200×3200 → 1100×1600, camera-binned blocks untouched), so all
-   experiments share one pixel size; the *Factor* column can be changed per block.
-   *Convert* writes a working copy `<experiment>.mpsca.zarr` (time-averaged to the
-   working fps, spatially binned as chosen). Put it on a local SSD.
-2. **Preprocess**: bad-frame threshold (bad frames are flagged, never deleted), then
-   projections: mean, max, std and the *local correlation* image, which shows active
-   cells clearly in noisy recordings.
-3. **Segment**: Cellpose (default input mean + correlation; measure the cell diameter by
-   drawing a line) or the classic threshold sweep of the original notebook. Correct
-   ROIs directly in the *ROIs* layer, then *Save ROIs*.
-4. **Traces**: F and ΔF/F per ROI. The baseline is computed separately per recording
-   block, so it never spans a pause. *Estimate offset* subtracts the camera dark level
-   (≈100 counts here; without it ΔF/F is strongly compressed). Click an ROI to see its trace.
-5. **Analysis**: correlation, proximity vs co-activity, spikes and population bursts per
-   condition, PCA. *Robust noise (MAD)* is recommended for active recordings: the
-   notebook's rolling-RMS threshold rises with the activity itself. *Export* writes CSV
-   tables and PNG figures.
-6. **Summary**: add analysed experiments and compare them by genotype.
+**Set up once, convert all, test on a few, run on all.**
 
-Every step stores its parameters in the experiment's `.mpsca.zarr`, so results are traceable.
+1. **Project** tab
+   - *Video folder*: searched in all subfolders for the *File pattern* (default
+     `*.ome.tif`; several patterns separated by `;`).
+   - *Excel (optional)*: describes the files, see below. Without it, each top-level folder
+     is one recording and each acquisition (a Micro-Manager file series) one block,
+     named after its folder.
+   - *Output folder*: on a fast local disk. It holds `mpsca_project.json` (everything you
+     set up) and one `<recording>.mpsca.zarr` per recording.
+   - *Find recordings* lists them. Untick recordings you do not want, *Add description
+     column…* (e.g. *Genotype*) and type the values. Select a recording to see and edit
+     its files: block, condition name, used for segmentation, used at all.
+   - *Scan all* reads only the file headers of every recording and lists anything odd per
+     recording: missing or truncated files, frame counts that differ from the Excel, frame
+     rate, single images (excluded automatically), blocks whose folder names do not sort in
+     recording order (put in order by timestamp). When spatial binning is needed (blocks of
+     different size, or recorded with less camera binning than the *Common grid*) one
+     dialog lists all affected recordings with the proposal; the *Factor* of each block
+     can also be set by hand.
+   - *Convert all* (scans first if needed) converts every ticked recording one after the
+     other; already converted ones are skipped, interrupted ones redone, and a failing
+     recording does not stop the others.
+2. **Preprocess / Segment / Traces / Analysis** tabs: select a recording in the project
+   table, *Open selected recording*, and try the settings: bad-frame threshold;
+   Cellpose (input mean + correlation image, diameter measured with a drawn line) or the
+   classic threshold sweep; ΔF/F baseline and camera offset (*auto* estimates it per
+   recording); analysis thresholds (*Robust noise (MAD)* is recommended). ROIs can be
+   corrected by hand in the *ROIs* layer and saved. The values in these tabs are the
+   project settings and are saved with the project.
+3. **Run all** tab: shows exactly the settings that will be used, the steps to run and
+   the converted recordings. ROIs corrected by hand are kept unless unticked.
+4. **Summary** tab: *Project recordings* adds all analysed recordings; group them by any
+   description field.
+
+### Excel file
+
+One or more sheets. Columns are found by their header:
+
+| Header (any of) | Meaning |
+|---|---|
+| File name / Filename / File | the file, with or without `.ome` / `.tif` (required) |
+| Main folder / Recording / Experiment / Folder | the recording's folder name; a filled cell starts a new recording. Without it, each sheet is one recording, matched to a folder of the same name |
+| Subfolder | only used when a file name exists in several subfolders |
+| Frames | frames expected for the block (checked by the scan) |
+| Segmentation | yes/no per file: frames used for the segmentation images |
+| anything else | free description, e.g. Application, Phase, Time |
+
+Description cells are filled downwards; a filled description cell starts a new block.
+The block name is made of the description columns that change between blocks
+(override with *Block names from*, e.g. `Application, Phase`). Columns with a single
+value for a whole recording, and the sheet name, become recording descriptions.
+Files on disk that the Excel does not list are shown but not used.
 
 ## Command line
 
 ```
-mpsca scan    --folder Z:\...\05_11_25_Min6_C23_KO_Binning_2_2_250ms_Exp1
-mpsca convert --folder Z:\...\<experiment> --out-dir D:\mpsca_data [--accept-proposal | --block-factors 0:2,1:2,2:2,3:1]
-mpsca convert --excel Application_period.xlsx --base-dir Z:\...\Ca_Anand_AllData --sheet "Min6 KO Exp1" --out-dir D:\mpsca_data
-mpsca process D:\mpsca_data\<experiment>.mpsca.zarr --method cellpose --diameter 12
-mpsca info    D:\mpsca_data\<experiment>.mpsca.zarr
+mpsca new --input Z:\...\Ca_Anand_AllData --excel Application_period.xlsx --out D:\mpsca_data
+mpsca list D:\mpsca_data
+mpsca scan D:\mpsca_data [--accept-proposal]
+mpsca convert D:\mpsca_data [--accept-proposal] [--only <recording> ...]
+mpsca run D:\mpsca_data [--steps bad_frames,projections,segment,traces,analysis,export] [--only ...]
+mpsca info D:\mpsca_data\<recording>.mpsca.zarr
 ```
 
-`convert` stops whenever spatial binning would be applied (block sizes differ, or blocks are
-below the common `--grid`, default camera 2×2) unless `--accept-proposal` or
-`--block-factors` is given.
+`run` uses the settings saved in the project (tested in the GUI). Add `--input <folder>`
+when the video folder has moved, e.g. another drive letter.
 
 ## Development
 

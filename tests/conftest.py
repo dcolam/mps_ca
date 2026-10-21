@@ -45,6 +45,21 @@ def synthetic_experiment(tmp_path):
             "order": [stem for _, stem, _ in layout]}
 
 
+def load_recording(root, xlsx=None, grouping="root"):
+    """The single recording under ``root``, described by ``xlsx`` when given."""
+    from mpsca.io import find_files, group_recordings, match_workbook, read_workbook, resolve
+
+    files = find_files(root)
+    if xlsx:
+        recs, issues = match_workbook(root, files, read_workbook(xlsx))
+        assert not issues, issues
+    else:
+        recs = group_recordings(root, files, grouping)
+    resolve(root, recs)
+    assert len(recs) == 1
+    return recs[0]
+
+
 def v2_proc(arr, ratio, b):
     """Reference binning copied from ca_pipeline_v2.ipynb (``_proc``)."""
     a = arr.astype(np.float32)
@@ -130,11 +145,30 @@ def synthetic_store(tmp_path):
     store.write_frames(pd.DataFrame({
         "source_file": "syn.tif", "source_frame": np.arange(T, dtype=np.int32),
         "block": np.where(np.arange(T) < 120, 0, 1).astype(np.int16),
-        "application": np.where(np.arange(T) < 120, "2mM Glucose", "20mM Glucose"),
-        "phase": "", "use_for_seg": True, "time_s": time_s,
+        "condition": np.where(np.arange(T) < 120, "2mM Glucose", "20mM Glucose"),
+        "use_for_seg": True, "time_s": time_s,
         "frame_mean": movie.mean(axis=(1, 2)), "is_bad": False,
     }))
-    store.set_meta(name="syn_WT", genotype="WT", fps=1.0)
+    store.set_meta(name="syn_1", description={"group": "A"}, fps=1.0)
     store.set_params("convert", {"target_fps": 1.0})
     store.mark_complete()
     return {"store": store, "truth": truth, "traces": traces}
+
+
+@pytest.fixture
+def two_recordings(tmp_path):
+    """R1 camera-binned (2x2), R2 unbinned; two blocks each, recorded at 4 fps."""
+    root = tmp_path / "data"
+    movie, truth, _ = make_cell_movie(T=160, shape=(48, 64), n_cells=6)
+    raw = np.repeat(movie, 4, axis=0).round().astype(np.uint16)  # 4 fps raw -> 1 fps working
+    t0 = 1.7e9
+    for rec, binning in (("R1", 2), ("R2", 1)):
+        frames = raw if binning == 2 else np.repeat(np.repeat(raw, 2, axis=1), 2, axis=2)
+        for i, sub in enumerate(("1_1", "1_2")):
+            (root / rec / sub).mkdir(parents=True)
+            part = frames[i * 320:(i + 1) * 320]
+            write_mm_tiff(root / rec / sub / f"{sub}_MMStack_Default.ome.tif", part,
+                          t0 + i * 400, binning=binning)
+    (root / "R1" / "results").mkdir()
+    (root / "R1" / "results" / "mean_image.tif").write_bytes(b"not matched by the pattern")
+    return {"root": root, "out": tmp_path / "out", "truth": truth}

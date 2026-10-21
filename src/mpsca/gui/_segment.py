@@ -132,6 +132,22 @@ class SegmentTab(QWidget):
         self.btn_grid.clicked.connect(self._toggle_grid)
         session.labels_changed.connect(self._count)
 
+    def read_settings(self, s):
+        self.cb_method.setCurrentIndex(1 if s.seg_method == "classic" or not cellpose_seg.available() else 0)
+        for name, box in self.ch_boxes.items():
+            box.setChecked(name in s.seg_channels)
+        self.cp_form.set_value(s.cellpose)
+        if self.cb_gpu.isEnabled() and s.cellpose.gpu is not None:
+            self.cb_gpu.setChecked(bool(s.cellpose.gpu))
+        self.cl_form.set_value(s.classic)
+
+    def write_settings(self, s):
+        s.seg_method = "cellpose" if self.cb_method.currentIndex() == 0 else "classic"
+        s.seg_channels = self.channels()
+        s.cellpose = self.cp_form.value()
+        s.cellpose.gpu = self.cb_gpu.isChecked()
+        s.classic = self.cl_form.value()
+
     def _count(self):
         layer = self.session.roi_layer()
         self.count.setText(f"{int(layer.data.max())} ROIs" if layer is not None else "")
@@ -147,6 +163,7 @@ class SegmentTab(QWidget):
             self.status.setText("Compute the projections first (Preprocess).")
             return
         lock = [self.btn_run, self.btn_save, self.btn_clean]
+        self.session.pull_settings()
         if self.stack.currentIndex() == 0:
             p = self.cp_form.value()
             p.gpu = self.cb_gpu.isChecked()

@@ -6,7 +6,8 @@ one implementation and every result can be traced back to its settings.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+import logging
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Callable
 
@@ -18,8 +19,10 @@ from .analysis import AnalysisParams, AnalysisResult, analyse
 from .io.store import ExperimentStore
 from .preprocess import compute_projections, detect_low_signal, segmentation_frames
 from .segment import ClassicParams, SweepResult, classic_sweep
+from .segment.cellpose_seg import CellposeParams
 from .traces import DffParams, compute_dff, estimate_offset, extract_traces
 
+log = logging.getLogger(__name__)
 Progress = Callable[[float], None] | None
 PROJECTIONS = ("mean", "max", "std", "corr")
 
@@ -78,7 +81,7 @@ def run_classic(store: ExperimentStore, params: ClassicParams | None = None) -> 
 
 
 def run_cellpose(store: ExperimentStore, channels: list[str], params=None) -> np.ndarray:
-    from .segment.cellpose_seg import CellposeParams, build_input, run_cellpose as _run
+    from .segment.cellpose_seg import build_input, run_cellpose as _run
 
     p = params or CellposeParams()
     labels = _run(build_input(load_projections(store), channels), p)
@@ -173,4 +176,79 @@ def export_results(store: ExperimentStore, out_dir: str | Path | None = None,
             }.items():
                 fig.savefig(out / f"{name}.png", dpi=120)
     store.log(f"exported results to {out}")
+    return out
+
+
+# ---- settings shared by the GUI, the batch run and the CLI -----------------------
+STEPS = ("bad_frames", "projections", "segment", "traces", "analysis", "export")
+STEP_LABELS = {"bad_frames": "Bad frames", "projections": "Projections", "segment": "Segmentation",
+               "traces": "Traces", "analysis": "Analysis", "export": "Export"}
+
+
+def _build(cls, values: dict | None):
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in (values or {}).items() if k in names})
+
+
+@dataclass
+class PipelineSettings:
+    """Everything the processing steps need; tested on a few recordings, then run on all."""
+    bad_frame_thresh: float = 0.5
+    seg_method: str = "cellpose"          # "cellpose" or "classic"
+    seg_channels: list[str] = field(default_factory=lambda: ["mean", "corr"])
+    keep_edited_rois: bool = True         # never replace ROIs that were corrected by hand
+    cellpose: CellposeParams = field(default_factory=CellposeParams)
+    classic: ClassicParams = field(default_factory=ClassicParams)
+    traces: DffParams = field(default_factory=DffParams)
+    analysis: AnalysisParams = field(default_factory=AnalysisParams)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "PipelineSettings":
+        d = dict(d or {})
+        sub = {"cellpose": CellposeParams, "classic": ClassicParams, "traces": DffParams,
+               "analysis": AnalysisParams}
+        out = _build(cls, {k: v for k, v in d.items() if k not in sub})
+        for k, c in sub.items():
+            setattr(out, k, _build(c, d.get(k)))
+        return out
+
+
+def run_steps(store: ExperimentStore, settings: PipelineSettings, steps=STEPS,
+              out_dir: str | Path | None = None, progress: Progress = None,
+              say: Callable[[str], None] | None = None) -> dict:
+    """Run the chosen steps in order on one recording; returns a short summary."""
+    say = say or log.info
+    todo = [s for s in STEPS if s in steps]
+    res, out = None, {}
+    for i, step in enumerate(todo):
+        sub = (lambda f, i=i: progress((i + f) / len(todo))) if progress else None
+        if step == "bad_frames":
+            is_bad, _ = set_bad_frames(store, settings.bad_frame_thresh)
+            out["bad_frames"] = int(is_bad.sum())
+        elif step == "projections":
+            run_projections(store, progress=sub)
+        elif step == "segment":
+            act = active_labels(store)
+            if settings.keep_edited_rois and act is not None and act[0] == "edited":
+                say(f"keeping {int(act[1].max())} hand-edited ROIs")
+                out["rois"] = int(act[1].max())
+            elif settings.seg_method == "cellpose":
+                out["rois"] = int(run_cellpose(store, settings.seg_channels, settings.cellpose).max())
+            else:
+                out["rois"] = int(run_classic(store, settings.classic).labels.max())
+        elif step == "traces":
+            run_traces(store, settings.traces, progress=sub)
+        elif step == "analysis":
+            res = run_analysis(store, settings.analysis)
+            out["bursts"] = res.summary["n_bursts"]
+        elif step == "export":
+            if res is None and store.has("traces/dff"):
+                res = run_analysis(store, settings.analysis)
+            out["export"] = str(export_results(store, out_dir, res))
+        say(f"{STEP_LABELS[step]} done")
+        if progress:
+            progress((i + 1) / len(todo))
     return out

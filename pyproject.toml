@@ -7,7 +7,7 @@ name = "mpsca"
 version = "0.1.0"
 description = "Calcium-imaging processing for Min6 recordings: lazy TIFF import, Zarr experiment stores, segmentation, traces and analysis"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # zarr 3 needs 3.11+
 dependencies = [
     "numpy",
     "scipy",

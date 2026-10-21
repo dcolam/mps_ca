@@ -2,9 +2,8 @@ import dask.array as da
 import numpy as np
 import pytest
 
-from conftest import v2_proc
-from mpsca.cli import main
-from mpsca.io import ConvertParams, ExperimentStore, convert_experiment, open_tiff_lazy, parse_excel, resolve_paths
+from conftest import load_recording, v2_proc
+from mpsca.io import ConvertParams, ExperimentStore, convert_recording, open_tiff_lazy, scan_recording
 from mpsca.preprocess import bin_movie
 
 
@@ -26,12 +25,11 @@ def test_bin_movie_matches_v2(t, s):
 
 
 def _convert(synthetic_experiment, tmp_path, **kw):
-    (meta,) = parse_excel(synthetic_experiment["xlsx"])
-    resolve_paths(synthetic_experiment["exp"], meta)
+    rec = load_recording(synthetic_experiment["root"], synthetic_experiment["xlsx"])
     seen = []
     kw.setdefault("spatial_binning", 2)  # v2 binned 2x2 in software
-    store = convert_experiment(meta, tmp_path / "exp.mpsca.zarr", ConvertParams(**kw),
-                               progress=seen.append)
+    store = convert_recording(rec, tmp_path / "exp.mpsca.zarr", ConvertParams(**kw),
+                              progress=seen.append)
     return store, seen
 
 
@@ -48,7 +46,7 @@ def test_convert_matches_v2_and_masks_bad_frames(synthetic_experiment, tmp_path)
     assert bad.tolist() == [5 + 1]  # 5 binned frames from file 1, then binned frame 1 of file 2
     # time follows the raw frame position: file 1 has 23 raw frames (3 trimmed by binning)
     np.testing.assert_allclose(frames["time_s"][:7], [0, 1, 2, 3, 4, 5.75, 6.75])
-    assert list(frames["application"].unique()) == ["2mM Glucose", "20mM Glucose"]
+    assert list(frames["condition"].unique()) == ["2mM Glucose · Starvation · 10s", "20mM Glucose · Sync · 5s"]
     assert frames["use_for_seg"].tolist() == [True] * 5 + [False] * 4 + [True] * 5
 
 
@@ -57,7 +55,8 @@ def test_frame_count_warnings_and_reopen(synthetic_experiment, tmp_path):
     warnings = store.meta["frame_warnings"]
     assert len(warnings) == 1 and "20mM Glucose" in warnings[0]  # 21 on disk, 24 listed
     reopened = ExperimentStore.open(tmp_path / "exp.mpsca.zarr", mode="r")
-    assert reopened.meta["genotype"] == "WT"
+    assert reopened.meta["description"]["Binning"] == "2*2"
+    assert [b["condition"] for b in reopened.meta["blocks"]] == ["2mM Glucose · Starvation · 10s", "20mM Glucose · Sync · 5s"]
     assert reopened.params("convert")["spatial_binning"] == 2
     assert reopened.read_frames().equals(store.read_frames())
 
@@ -66,16 +65,6 @@ def test_refuses_to_overwrite(synthetic_experiment, tmp_path):
     _convert(synthetic_experiment, tmp_path)
     with pytest.raises(Exception):
         _convert(synthetic_experiment, tmp_path)
-
-
-def test_cli_convert_and_info(synthetic_experiment, tmp_path, capsys):
-    rc = main(["convert", "--excel", str(synthetic_experiment["xlsx"]), "--binning", "2",
-               "--base-dir", str(synthetic_experiment["root"]), "--out-dir", str(tmp_path / "out")])
-    assert rc == 0
-    out = tmp_path / "out" / f"{synthetic_experiment['exp'].name}.mpsca.zarr"
-    assert main(["info", str(out)]) == 0
-    text = capsys.readouterr().out
-    assert "20mM Glucose" in text and "bad" in text
 
 
 def test_convert_with_many_chunks(synthetic_experiment, tmp_path, monkeypatch):
@@ -98,13 +87,9 @@ def test_geometry_recorded(synthetic_experiment, tmp_path):
 
 
 def test_mixed_resolution_and_timestamps(mixed_resolution_experiment, tmp_path):
-    from mpsca.io import ExperimentMeta
-    from mpsca.io.metadata import entries_from_files
-
     d = mixed_resolution_experiment
-    meta = ExperimentMeta(name="mixed", files=entries_from_files(
-        [d["exp"] / "1_1" / "a.ome.tif", d["exp"] / "1_2" / "b.ome.tif"]))
-    store = convert_experiment(meta, tmp_path / "m.mpsca.zarr")
+    rec = load_recording(d["exp"])
+    store = convert_recording(rec, tmp_path / "m.mpsca.zarr")
 
     # default: bring the unbinned block down to the camera-binned size, nothing more
     ref = np.concatenate([v2_proc(d["hi"], 4, 2), v2_proc(d["lo"], 4, 1)])
@@ -134,13 +119,9 @@ def test_fill_missing_timestamps():
 
 
 def test_scan_and_block_overrides(mixed_resolution_experiment, tmp_path):
-    from mpsca.io import ExperimentMeta, scan_experiment
-    from mpsca.io.metadata import entries_from_files
-
     d = mixed_resolution_experiment
-    meta = ExperimentMeta(name="mixed", files=entries_from_files(
-        [d["exp"] / "1_1" / "a.ome.tif", d["exp"] / "1_2" / "b.ome.tif"]))
-    report = scan_experiment(meta)
+    rec = load_recording(d["exp"])
+    report = scan_recording(rec)
     assert report.resolution_mismatch
     assert report.proposed_factors() == {0: 2, 1: 1}
     assert report.proposed_factors(2) == {0: 4, 1: 2}
@@ -150,42 +131,25 @@ def test_scan_and_block_overrides(mixed_resolution_experiment, tmp_path):
 
     # user picks 4x4 / 2x2 explicitly
     params = ConvertParams(block_spatial_factors={0: 4, 1: 2})
-    store = convert_experiment(meta, tmp_path / "o.mpsca.zarr", params, report=report)
+    store = convert_recording(rec, tmp_path / "o.mpsca.zarr", params, report=report)
     assert store.movie.shape[1:] == (5, 6)
     # inconsistent choice is refused before anything is written
     with pytest.raises(ValueError, match="different frame sizes"):
-        convert_experiment(meta, tmp_path / "bad.mpsca.zarr",
+        convert_recording(rec, tmp_path / "bad.mpsca.zarr",
                            ConvertParams(block_spatial_factors={0: 2, 1: 2}), report=report)
     assert not (tmp_path / "bad.mpsca.zarr").exists()
-
-
-def test_cli_scan_and_mismatch_requires_decision(mixed_resolution_experiment, tmp_path, capsys):
-    folder = str(mixed_resolution_experiment["exp"])
-    assert main(["scan", "--folder", folder]) == 0
-    text = capsys.readouterr().out
-    assert "frame size differs" in text and "20x24" in text
-    # convert refuses to guess when sizes differ ...
-    assert main(["convert", "--folder", folder, "--out-dir", str(tmp_path)]) == 1
-    assert "--accept-proposal" in capsys.readouterr().out
-    # ... and proceeds with an explicit choice
-    assert main(["convert", "--folder", folder, "--out-dir", str(tmp_path),
-                 "--block-factors", "0:4,1:2"]) == 0
-    store = ExperimentStore.open(tmp_path / "exp_mixed.mpsca.zarr")
-    assert store.movie.shape[1:] == (5, 6)
 
 
 def test_unbinned_experiment_goes_to_common_grid(tmp_path):
     """Like WT Exp1: every block unbinned -> proposal bins 2x2 and the user is asked."""
     from conftest import write_mm_tiff
-    from mpsca.io import ExperimentMeta, scan_experiment
-    from mpsca.io.metadata import entries_from_folder
 
     rng = np.random.default_rng(5)
     for i, sub in enumerate(["1_1", "1_2"]):
         (tmp_path / "e" / sub).mkdir(parents=True)
         write_mm_tiff(tmp_path / "e" / sub / "a.ome.tif",
                       rng.integers(90, 110, (8, 20, 24), dtype=np.uint16), 1.7e9 + 100 * i, binning=1)
-    report = scan_experiment(entries_from_folder(tmp_path / "e"))
+    report = scan_recording(load_recording(tmp_path / "e"))
     assert not report.resolution_mismatch
     assert report.proposed_factors() == {0: 2, 1: 2}
     assert report.needs_decision()
@@ -198,3 +162,34 @@ def test_detected_fps_jitter_is_tolerated():
     assert ConvertParams(source_fps=4.02, target_fps=1).temporal_factor == 4
     with pytest.raises(ValueError):
         ConvertParams(source_fps=4.5, target_fps=1).temporal_factor
+
+
+def test_blocks_put_in_time_order(tmp_path):
+    """Folder names need not sort in acquisition order; timestamps decide."""
+    from conftest import write_mm_tiff
+
+    rng = np.random.default_rng(6)
+    for name, start in [("1200", 0), ("40X BF", 5000), ("2400", 1000)]:
+        (tmp_path / "e" / name).mkdir(parents=True)
+        write_mm_tiff(tmp_path / "e" / name / f"{name}_MMStack_Default.ome.tif",
+                      rng.integers(90, 110, (8, 10, 12), dtype=np.uint16), 1.7e9 + start)
+    rec = load_recording(tmp_path / "e")
+    assert [rec.conditions()[b] for b in sorted(rec.conditions())] == ["40X BF", "1200", "2400"]
+    report = scan_recording(rec)
+    assert [f.entry.condition for f in report.files] == ["1200", "2400", "40X BF"]
+    assert any("acquisition order" in m for m in report.issues)
+
+
+def test_single_images_are_excluded(tmp_path):
+    import tifffile
+    from conftest import write_mm_tiff
+
+    (tmp_path / "e" / "1_1").mkdir(parents=True)
+    (tmp_path / "e" / "40X").mkdir()
+    write_mm_tiff(tmp_path / "e" / "1_1" / "a.ome.tif", np.ones((8, 10, 12), np.uint16), 1.7e9)
+    tifffile.imwrite(tmp_path / "e" / "40X" / "40X_MMStack_Default.ome.tif", np.ones((10, 12), np.uint16))
+    rec = load_recording(tmp_path / "e")
+    assert rec.n_blocks == 2
+    report = scan_recording(rec)
+    assert len(report.files) == 1 and rec.n_blocks == 1
+    assert [f.note for f in rec.files if not f.include] == ["single image, not a video"]

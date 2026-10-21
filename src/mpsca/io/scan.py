@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 
-from .metadata import ExperimentMeta, FileEntry
+from .metadata import FileEntry, Recording
 from .mm_tiff import FrameInfo, _page_metadata, _received_time
 
 log = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ class FileScan:
 
 @dataclass
 class ScanReport:
-    meta: ExperimentMeta
+    recording: Recording
     files: list[FileScan] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
 
@@ -76,8 +76,7 @@ class ScanReport:
             t = t[np.isfinite(t)]
             rows.append({
                 "block": block,
-                "application": fs[0].entry.application,
-                "phase": fs[0].entry.phase,
+                "condition": fs[0].entry.condition,
                 "files": len(fs),
                 "frames": sum(f.n_frames for f in fs),
                 "expected": fs[0].entry.expected_frames,
@@ -87,6 +86,21 @@ class ScanReport:
                 "seg_files": sum(f.entry.use_for_seg for f in fs),
             })
         return pd.DataFrame(rows)
+
+
+def _order_by_time(report: ScanReport) -> None:
+    """Put blocks in acquisition order when every file has timestamps (folder names may not sort)."""
+    starts: dict[int, float] = {}
+    for f in report.files:
+        t = f.info.times[np.isfinite(f.info.times)]
+        if not len(t):
+            return
+        starts[f.entry.block] = min(starts.get(f.entry.block, np.inf), float(t.min()))
+    order = sorted(range(len(report.files)), key=lambda i: (starts[report.files[i].entry.block], i))
+    if order != sorted(order):
+        report.files = [report.files[i] for i in order]
+        report.issues.append("blocks put in acquisition order (by timestamp): "
+                             + ", ".join(dict.fromkeys(f.entry.condition for f in report.files)))
 
 
 def scan_file(entry: FileEntry) -> FileScan:
@@ -107,34 +121,41 @@ def scan_file(entry: FileEntry) -> FileScan:
                     FrameInfo(np.asarray(times, dtype=np.float64), binning, pixel))
 
 
-def scan_experiment(meta: ExperimentMeta, source_fps: float = 4.0,
-                    progress: Callable[[float], None] | None = None) -> ScanReport:
-    report = ScanReport(meta)
-    entries = [fe for fe in meta.files if fe.path is not None]
-    for fe in meta.files:
+def scan_recording(rec: Recording, source_fps: float = 4.0,
+                   progress: Callable[[float], None] | None = None) -> ScanReport:
+    report = ScanReport(rec)
+    entries = [fe for fe in rec.active_files if fe.path is not None]
+    for fe in rec.active_files:
         if fe.path is None:
-            report.issues.append(f"missing file: {fe.filename}")
+            report.issues.append(f"missing file: {fe.relpath}")
     for i, fe in enumerate(entries):
+        if progress:
+            progress(i / len(entries))
         fs = scan_file(fe)
+        if fs.n_frames == 1:  # e.g. a reference snapshot with another objective
+            fe.include, fe.note = False, "single image, not a video"
+            report.issues.append(f"{fe.relpath}: single image, excluded")
+            continue
         report.files.append(fs)
         if fs.n_pages != fs.n_frames:
             report.issues.append(f"{fe.filename}: {fs.n_pages} pages but {fs.n_frames} readable "
                                  "frames (truncated or damaged file)")
-        if fs.n_frames == 1:
-            report.issues.append(f"{fe.filename}: single image, not a recording; remove it")
         t = fs.info.times[np.isfinite(fs.info.times)]
         if len(t) > 2:
             dt = float(np.median(np.diff(t)))
             if abs(dt * source_fps - 1) > 0.1:
                 report.issues.append(f"{fe.filename}: frame interval {dt:.3f} s, "
                                      f"expected {1 / source_fps:.3f} s")
-        if progress:
-            progress((i + 1) / len(entries))
+    if progress:
+        progress(1.0)
+    if not report.files:
+        report.issues.append("no readable video files")
+    _order_by_time(report)
 
     blocks = report.block_summary() if report.files else pd.DataFrame()
     for _, b in blocks.iterrows():
         if pd.notna(b["expected"]) and b["frames"] != b["expected"]:
-            report.issues.append(f"block {b['block']} ({b['application']}, {b['phase']}): "
+            report.issues.append(f"block {b['block']} ({b['condition']}): "
                                  f"{b['frames']} frames on disk, {int(b['expected'])} listed")
     if report.resolution_mismatch:
         sizes = ", ".join(f"block {b['block']}: {b['size']}" for _, b in blocks.iterrows())

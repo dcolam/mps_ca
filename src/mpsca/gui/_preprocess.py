@@ -48,12 +48,19 @@ class PreprocessTab(QWidget):
         self.btn_proj.clicked.connect(self.compute_projections)
         session.store_changed.connect(self.refresh)
 
+    def read_settings(self, s):
+        self.sp_thresh.setValue(s.bad_frame_thresh)
+
+    def write_settings(self, s):
+        s.bad_frame_thresh = self.sp_thresh.value()
+
     def refresh(self):
         store = self.session.store
         if store is None:
             return
         p = store.params("bad_frames") or store.params("convert")
-        self.sp_thresh.setValue(float(p.get("low_signal_thresh", 0.5)))
+        if self.session.project is None:  # in a project the settings stay as being tested
+            self.sp_thresh.setValue(float(p.get("low_signal_thresh", 0.5)))
         self._draw(p.get("cutoff", p.get("bad_frame_cutoff")))
 
     def _draw(self, cutoff=None):
@@ -71,6 +78,7 @@ class PreprocessTab(QWidget):
     def apply_threshold(self):
         if self.session.store is None:
             return
+        self.session.pull_settings()
         _, cutoff = pipeline.set_bad_frames(self.session.store, self.sp_thresh.value())
         self._draw(cutoff)
 

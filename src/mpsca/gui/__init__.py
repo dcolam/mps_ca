@@ -1,8 +1,9 @@
 """napari GUI for mpsca."""
+from pathlib import Path
 
 
-def launch(store: str | None = None):
-    """Open napari with the mpsca dock widget (and optionally an experiment store)."""
+def launch(path: str | None = None):
+    """Open napari with the mpsca dock widget, optionally with a project or a recording store."""
     import napari
 
     from ._main import MainWidget
@@ -10,6 +11,10 @@ def launch(store: str | None = None):
     viewer = napari.Viewer(title="mpsca")
     widget = MainWidget(viewer)
     viewer.window.add_dock_widget(widget, name="Calcium pipeline", area="right")
-    if store:
-        widget.session.open_store(store)
+    if path:
+        p = Path(path)
+        if p.suffix == ".zarr" or (p / "zarr.json").exists():
+            widget.session.open_store(p)
+        else:
+            widget.project_tab.open_project(p)
     napari.run()

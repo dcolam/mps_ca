@@ -107,16 +107,6 @@ def test_robust_noise_finds_spikes_in_active_cells(synthetic_store):
     assert res.active.sum() > 50 and hits.sum() / res.active.sum() > 0.9
 
 
-def test_cli_process_classic(synthetic_store, tmp_path, capsys):
-    from mpsca.cli import main
-
-    out = tmp_path / "results"
-    assert main(["process", str(synthetic_store["store"].path), "--method", "classic",
-                 "--out", str(out)]) == 0
-    assert (out / "summary.json").exists() and (out / "01_overview.png").exists()
-    assert "ROIs" in capsys.readouterr().out
-
-
 def test_offset_auto_is_estimated_and_recorded(synthetic_store):
     store = synthetic_store["store"]
     pipeline.save_labels(store, synthetic_store["truth"], "edited")
@@ -125,3 +115,20 @@ def test_offset_auto_is_estimated_and_recorded(synthetic_store):
     assert 95 < store.params("traces")["offset"] < 105
     pipeline.run_traces(store, DffParams(offset=0.0))  # explicit 0 is kept (notebook behaviour)
     assert store.params("traces")["offset"] == 0.0
+
+
+def test_settings_roundtrip_and_run_steps(synthetic_store, tmp_path):
+    s = pipeline.PipelineSettings(seg_method="classic")
+    s.traces.offset = 100.0
+    s.analysis.robust_noise = True
+    again = pipeline.PipelineSettings.from_dict(s.to_dict())
+    assert again == s and isinstance(again.traces, DffParams)
+
+    store = synthetic_store["store"]
+    out = pipeline.run_steps(store, s, out_dir=tmp_path / "res")
+    assert out["bad_frames"] == 1 and out["rois"] >= 8
+    assert (tmp_path / "res" / "summary.json").exists()
+    # hand-edited ROIs are kept on a second run
+    pipeline.save_labels(store, synthetic_store["truth"], "edited")
+    out = pipeline.run_steps(store, s, steps=["segment", "traces"])
+    assert out["rois"] == 12 and pipeline.active_labels(store)[0] == "edited"

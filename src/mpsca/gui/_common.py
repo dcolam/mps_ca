@@ -13,29 +13,39 @@ from qtpy.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QLabel, QLin
 
 class _Bridge(QObject):
     progress = Signal(float)
+    message = Signal(str)
 
 
 class Runner(QObject):
     """Run one function at a time in a worker thread, with a progress bar and error dialog.
 
-    The function receives ``progress=callable(fraction)`` when ``with_progress`` is set.
+    The function receives ``progress=callable(fraction)`` when ``with_progress`` is set,
+    and ``say=callable(text)`` when ``with_say`` is set (shown in ``log``, a list widget).
     Widgets listed in ``lock`` are disabled while it runs.
     """
     busy = Signal(bool)
 
-    def __init__(self, parent: QWidget, bar: QProgressBar, status: QLabel | None = None):
+    def __init__(self, parent: QWidget, bar: QProgressBar, status: QLabel | None = None, log=None):
         super().__init__(parent)
-        self._parent, self._bar, self._status = parent, bar, status
+        self._parent, self._bar, self._status, self._log = parent, bar, status, log
         self._worker = None
         self._bridge = _Bridge()
         self._bridge.progress.connect(lambda f: self._bar.setValue(int(round(f * 100))))
+        self._bridge.message.connect(self._show_message)
+
+    def _show_message(self, text: str) -> None:
+        if self._status is not None:
+            self._status.setText(text)
+        if self._log is not None:
+            self._log.addItem(text)
+            self._log.scrollToBottom()
 
     @property
     def running(self) -> bool:
         return self._worker is not None
 
     def run(self, fn: Callable, *args, done: Callable[[Any], None] | None = None,
-            message: str = "", with_progress: bool = True, lock=(), **kwargs):
+            message: str = "", with_progress: bool = True, with_say: bool = False, lock=(), **kwargs):
         from napari.qt.threading import create_worker
 
         if self._worker is not None:
@@ -43,6 +53,8 @@ class Runner(QObject):
             return None
         if with_progress:
             kwargs["progress"] = self._bridge.progress.emit
+        if with_say:
+            kwargs["say"] = self._bridge.message.emit
         self._bar.setRange(0, 100 if with_progress else 0)  # 0..0 = busy indicator
         self._bar.setValue(0)
         self._bar.setVisible(True)
@@ -51,7 +63,11 @@ class Runner(QObject):
         for w in lock:
             w.setEnabled(False)
 
+        worker = None
+
         def _finish():
+            if self._worker is not worker:  # already released (a follow-up job may be running)
+                return
             self._worker = None
             self._bar.setVisible(False)
             for w in lock:
@@ -67,6 +83,7 @@ class Runner(QObject):
             box.show()
 
         def _done(result):
+            _finish()  # release first, so ``done`` may start the next job
             if self._status is not None:
                 self._status.setText("Done.")
             if done is not None:
