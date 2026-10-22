@@ -28,6 +28,10 @@ pip install --isolated torch==2.8.0 torchvision==0.23.0 --index-url https://down
 Without a GPU everything works on the CPU; Cellpose then takes a few minutes per
 recording. When the GPU is full (shared machine), Cellpose falls back to the CPU.
 
+The GUI uses Qt 6 (PyQt6); napari's PyQt5 support is deprecated. An environment that still
+has PyQt5 from an older install: `pip uninstall -y PyQt5 PyQt5-Qt5 PyQt5_sip` and
+`pip install --isolated PyQt6`.
+
 Start the GUI with `mpsca gui` (or `mpsca gui D:\mpsca_data` to reopen a project).
 
 ## Workflow
@@ -56,12 +60,23 @@ Start the GUI with `mpsca gui` (or `mpsca gui D:\mpsca_data` to reopen a project
      other; already converted ones are skipped, interrupted ones redone, and a failing
      recording does not stop the others.
 2. **Preprocess / Segment / Traces / Analysis** tabs: select a recording in the project
-   table, *Open selected recording*, and try the settings: bad-frame threshold;
+   table, *Open selected recording*, and try the settings: bad-frame threshold and,
+   optionally, the frames the projections are computed over (e.g. `0-299, 1200-`, numbers
+   as on napari's time slider; empty = the files ticked for segmentation);
    Cellpose (input mean + correlation image, diameter measured with a drawn line) or the
    classic threshold sweep; ΔF/F baseline and camera offset (*auto* estimates it per
    recording); analysis thresholds (*Robust noise (MAD)* is recommended). ROIs can be
    corrected by hand in the *ROIs* layer and saved. The values in these tabs are the
    project settings and are saved with the project.
+
+   Several ticked projections are combined into one Cellpose input with up to 3
+   channels (like the colours of an RGB image), giving one segmentation. For exploring,
+   Cellpose can also run on the selected image layer (for the movie: the frame at the
+   time slider), or on the movie window by window (averages of N frames, 1 = every
+   frame; slow without a GPU, *Stop* keeps the windows done so far). The window results
+   follow the time slider in the *ROIs per window* layer; *Use the ROIs of the current
+   window* copies one to *ROIs*. ROI numbers are not matched between windows, so traces
+   always use the single *ROIs* image. *Run all* always segments the projections.
 3. **Run all** tab: shows exactly the settings that will be used, the steps to run and
    the converted recordings. ROIs corrected by hand are kept unless unticked.
 4. **Summary** tab: *Project recordings* adds all analysed recordings; group them by any

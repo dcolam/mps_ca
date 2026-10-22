@@ -132,3 +132,50 @@ def test_settings_roundtrip_and_run_steps(synthetic_store, tmp_path):
     pipeline.save_labels(store, synthetic_store["truth"], "edited")
     out = pipeline.run_steps(store, s, steps=["segment", "traces"])
     assert out["rois"] == 12 and pipeline.active_labels(store)[0] == "edited"
+
+
+def _fake_cellpose(image, params=None):
+    """Stand-in for Cellpose: bright connected blobs."""
+    from skimage import measure
+    img = image if image.ndim == 2 else image[0]
+    return measure.label(img > img.mean() + 2 * img.std()).astype(np.int32)
+
+
+def test_projection_frames_and_parser(synthetic_store):
+    from mpsca.preprocess import parse_frames
+
+    assert parse_frames("0-3, 8-, 5", 10).tolist() == [0, 1, 2, 3, 5, 8, 9]
+    assert parse_frames("  ", 10) is None
+    for bad in ("a-3", "12", "12-", "5-2"):
+        with pytest.raises(ValueError):
+            parse_frames(bad, 10)
+    store = synthetic_store["store"]
+    pipeline.set_bad_frames(store, 0.5)  # frame 100 is bad
+    proj = pipeline.run_projections(store, "90-109")
+    assert store.params("projections") == {"frames": "90-109", "n_frames": 19}
+    assert np.allclose(proj["mean"], np.asarray(store.movie[[*range(90, 100), *range(101, 110)]].mean(0)))
+    with pytest.raises(ValueError, match="bad"):
+        pipeline.run_projections(store, "100")
+
+
+def test_cellpose_windows_and_image(synthetic_store, monkeypatch):
+    monkeypatch.setattr("mpsca.segment.cellpose_seg.run_cellpose", _fake_cellpose)
+    store, truth = synthetic_store["store"], synthetic_store["truth"]
+    pipeline.set_bad_frames(store, 0.5)
+    assert pipeline.frame_windows(10, 4, "0-4, 7-") == [(0, 3), (4, 4), (7, 9)]
+    calls = []
+    done = pipeline.run_cellpose_windows(store, 50, frames="0-199",
+                                         should_stop=lambda: len(calls) >= 3,
+                                         progress=calls.append)
+    assert done == 3  # stopped after three of four windows
+    stack = pipeline.load_windows(store)
+    assert stack.shape == store.movie.shape
+    assert np.asarray(stack[10]).max() > 0 and not np.asarray(stack[160]).any()  # not done
+    assert not np.asarray(stack[230]).any()  # outside the windows
+    assert pipeline.active_labels(store) is None  # windows never replace the ROIs
+
+    labels = pipeline.run_cellpose_image(store, np.asarray(store.movie[5]), "frame 5")
+    assert labels.shape == truth.shape and pipeline.active_labels(store)[0] == "cellpose"
+    assert store.params("segment")["source"] == "frame 5"
+    with pytest.raises(ValueError, match="match"):
+        pipeline.run_cellpose_image(store, np.zeros((3, 3)), "tiny")

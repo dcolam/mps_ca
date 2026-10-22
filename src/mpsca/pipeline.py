@@ -17,7 +17,7 @@ from skimage import measure
 
 from .analysis import AnalysisParams, AnalysisResult, analyse
 from .io.store import ExperimentStore
-from .preprocess import compute_projections, detect_low_signal, segmentation_frames
+from .preprocess import compute_projections, detect_low_signal, parse_frames, segmentation_frames
 from .segment import ClassicParams, SweepResult, classic_sweep
 from .segment.cellpose_seg import CellposeParams
 from .traces import DffParams, compute_dff, estimate_offset, extract_traces
@@ -40,13 +40,15 @@ def set_bad_frames(store: ExperimentStore, thresh: float) -> tuple[np.ndarray, f
     return is_bad, cutoff
 
 
-def run_projections(store: ExperimentStore, progress: Progress = None) -> dict[str, np.ndarray]:
-    idx = segmentation_frames(store.read_frames())
+def run_projections(store: ExperimentStore, frames: str = "",
+                    progress: Progress = None) -> dict[str, np.ndarray]:
+    """Projections over the frames in ``frames`` (e.g. ``"0-299"``), else the 'Segment.' frames."""
+    idx = segmentation_frames(store.read_frames(), frames)
     proj = compute_projections(store.movie, idx, progress=progress)
     for name, img in proj.items():
         store.save_array(f"projections/{name}", img, n_frames=int(len(idx)))
-    store.set_params("projections", {"n_frames": int(len(idx))})
-    store.log(f"projections over {len(idx)} frames")
+    store.set_params("projections", {"frames": frames, "n_frames": int(len(idx))})
+    store.log(f"projections over {len(idx)} frames" + (f" ({frames})" if frames else ""))
     return proj
 
 
@@ -88,6 +90,94 @@ def run_cellpose(store: ExperimentStore, channels: list[str], params=None) -> np
     save_labels(store, labels, "cellpose", method="cellpose", channels=channels, params=asdict(p))
     store.set_params("segment", {"method": "cellpose", "channels": channels, **asdict(p)})
     return labels
+
+
+def run_cellpose_image(store: ExperimentStore, image: np.ndarray, source: str,
+                       params: CellposeParams | None = None) -> np.ndarray:
+    """Cellpose on any image of the movie's frame size (e.g. one frame, or a layer in the viewer)."""
+    from .segment.cellpose_seg import run_cellpose as _run
+
+    if image.shape != store.movie.shape[1:]:
+        raise ValueError(f"the image is {image.shape}, but ROIs must match the movie frames "
+                         f"{store.movie.shape[1:]}")
+    p = params or CellposeParams()
+    labels = _run(np.asarray(image, dtype=np.float32), p)
+    save_labels(store, labels, "cellpose", method="cellpose", source=source, params=asdict(p))
+    store.set_params("segment", {"method": "cellpose", "source": source, **asdict(p)})
+    return labels
+
+
+def frame_windows(n_frames: int, size: int, frames: str = "") -> list[tuple[int, int]]:
+    """Consecutive windows of ``size`` frames, (first, last) inclusive, within ``frames``."""
+    idx = parse_frames(frames, n_frames)
+    idx = np.arange(n_frames) if idx is None else idx
+    out = []
+    for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
+        out += [(int(run[i]), int(run[min(i + size, len(run)) - 1])) for i in range(0, len(run), size)]
+    return out
+
+
+def run_cellpose_windows(store: ExperimentStore, size: int, params: CellposeParams | None = None,
+                         frames: str = "", progress: Progress = None,
+                         should_stop: Callable[[], bool] | None = None) -> int:
+    """Cellpose on the movie: every ``size`` frames are averaged (1 = every single frame).
+
+    Results go to ``windows/labels`` (one label image per window, ROI numbers are NOT
+    matched between windows) with the frame range of each window in ``windows/first`` and
+    ``windows/last``. Bad frames are left out of the averages. Returns the number of
+    windows segmented (fewer than planned when stopped).
+    """
+    from .segment.cellpose_seg import run_cellpose as _run
+
+    p = params or CellposeParams()
+    movie = store.movie
+    wins = frame_windows(movie.shape[0], max(1, int(size)), frames)
+    if not wins:
+        raise ValueError("no frames selected")
+    bad = store.read_frames()["is_bad"].to_numpy()
+    first, last = np.array([w[0] for w in wins]), np.array([w[1] for w in wins])
+    store.save_array("windows/first", first)
+    store.save_array("windows/last", last)
+    arr = store.create_array("windows/labels", (len(wins), *movie.shape[1:]), (1, *movie.shape[1:]),
+                             np.int32, size=int(size), frames=frames, params=asdict(p), done=0)
+    n_rois = np.zeros(len(wins), dtype=np.int32)
+    done = 0
+    for k, (a, b) in enumerate(wins):
+        if should_stop is not None and should_stop():
+            break
+        idx = np.arange(a, b + 1)
+        idx = idx[~bad[idx]]
+        if len(idx):
+            img = np.asarray(movie[idx].mean(axis=0), dtype=np.float32)
+            labels = _run(img, p)
+            arr[k] = labels
+            n_rois[k] = labels.max()
+        done = k + 1
+        if progress:
+            progress(done / len(wins))
+    arr.attrs["done"] = done
+    store.save_array("windows/n_rois", n_rois)
+    store.log(f"cellpose on {done}/{len(wins)} windows of {size} frame(s)")
+    return done
+
+
+def load_windows(store: ExperimentStore):
+    """The window segmentation as a lazy (T, Y, X) stack aligned with the movie, or None.
+
+    Frame t shows the labels of the window that contains it (empty outside the windows).
+    """
+    import dask.array as da
+
+    if not store.has("windows/labels"):
+        return None
+    lab = store.lazy_array("windows/labels")
+    first, last = store.load_array("windows/first"), store.load_array("windows/last")
+    n = store.movie.shape[0]
+    which = np.full(n, len(first))  # index of the empty image appended below
+    for k, (a, b) in enumerate(zip(first, last)):
+        which[a:b + 1] = k
+    lab = da.concatenate([lab, da.zeros((1, *lab.shape[1:]), dtype=lab.dtype, chunks=lab.chunksize)])
+    return lab[which]
 
 
 # ---- traces -----------------------------------------------------------------
@@ -194,6 +284,7 @@ def _build(cls, values: dict | None):
 class PipelineSettings:
     """Everything the processing steps need; tested on a few recordings, then run on all."""
     bad_frame_thresh: float = 0.5
+    proj_frames: str = ""                 # e.g. "0-299, 1200-"; empty = frames ticked 'Segment.'
     seg_method: str = "cellpose"          # "cellpose" or "classic"
     seg_channels: list[str] = field(default_factory=lambda: ["mean", "corr"])
     keep_edited_rois: bool = True         # never replace ROIs that were corrected by hand
@@ -229,7 +320,7 @@ def run_steps(store: ExperimentStore, settings: PipelineSettings, steps=STEPS,
             is_bad, _ = set_bad_frames(store, settings.bad_frame_thresh)
             out["bad_frames"] = int(is_bad.sum())
         elif step == "projections":
-            run_projections(store, progress=sub)
+            run_projections(store, settings.proj_frames, progress=sub)
         elif step == "segment":
             act = active_labels(store)
             if settings.keep_edited_rois and act is not None and act[0] == "edited":

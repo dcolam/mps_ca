@@ -11,6 +11,7 @@ from ..io.store import ExperimentStore
 from ..pipeline import PipelineSettings
 
 ROI_LAYER = "ROIs"
+WINDOWS_LAYER = "ROIs per window"
 MOVIE_LAYER = "movie"
 
 
@@ -93,6 +94,7 @@ class Session(QObject):
         act = pipeline.active_labels(self.store)
         if act is not None:
             self.show_labels(act[1])
+        self.show_windows(visible=False)
         self.viewer.reset_view()
 
     def show_image(self, name: str, data: np.ndarray, visible: bool = True, **kwargs):
@@ -117,6 +119,24 @@ class Session(QObject):
         self.viewer.layers.selection.active = layer
         self.labels_changed.emit()
         return layer
+
+    def show_windows(self, visible: bool = True):
+        """The movie segmented window by window, as labels that follow the time slider."""
+        stack = pipeline.load_windows(self.store)
+        if WINDOWS_LAYER in self.viewer.layers:
+            self.viewer.layers.remove(WINDOWS_LAYER)
+        if stack is None:
+            return None
+        layer = self.viewer.add_labels(stack, name=WINDOWS_LAYER, opacity=0.45, visible=visible,
+                                       metadata={"mpsca": True})
+        if not visible:  # keep the ROIs layer selected for editing
+            roi = self.roi_layer()
+            if roi is not None:
+                self.viewer.layers.selection.active = roi
+        return layer
+
+    def windows_layer(self):
+        return self.viewer.layers[WINDOWS_LAYER] if WINDOWS_LAYER in self.viewer.layers else None
 
     def roi_layer(self):
         return self.viewer.layers[ROI_LAYER] if ROI_LAYER in self.viewer.layers else None

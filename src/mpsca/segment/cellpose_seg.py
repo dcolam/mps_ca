@@ -1,7 +1,9 @@
 """Cellpose segmentation of projection images (optional dependency).
 
-Cellpose runs on one 2-D image (or a stack of up to 3 channels, e.g. mean + corr),
-never on movie frames, so it is usable on CPU-only machines.
+Cellpose runs on one 2-D image or a stack of up to 3 channels (e.g. mean + corr): the
+channels are combined into ONE segmentation, like the colours of an RGB image. Usually
+that image is a projection, so it is usable on CPU-only machines; segmenting the movie
+window by window (``pipeline.run_cellpose_windows``) is slow without a GPU.
 """
 from __future__ import annotations
 
@@ -51,7 +53,9 @@ def build_input(projections: dict[str, np.ndarray], channels: list[str]) -> np.n
     """Stack the chosen projections, each normalised to 0..1, as (C, Y, X)."""
     if not channels:
         raise ValueError("choose at least one input image")
-    return np.stack([_normalise(projections[c]) for c in channels[:3]])
+    if len(channels) > 3:
+        raise ValueError("Cellpose takes at most 3 input images (channels)")
+    return np.stack([_normalise(projections[c]) for c in channels])
 
 
 _MODELS: dict = {}

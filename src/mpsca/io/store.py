@@ -100,6 +100,16 @@ class ExperimentStore:
         arr.attrs.update(attrs)
         return arr
 
+    def create_array(self, name: str, shape, chunks, dtype, **attrs) -> zarr.Array:
+        """An empty array at ``name`` that is filled piece by piece (replaces any old one)."""
+        arr = self.group.create_array(name, shape=shape, chunks=chunks, dtype=dtype, fill_value=0,
+                                      compressors=_COMPRESSOR, overwrite=True)
+        arr.attrs.update(attrs)
+        return arr
+
+    def lazy_array(self, name: str) -> da.Array:
+        return da.from_zarr(self.group[name])
+
     def load_array(self, name: str) -> np.ndarray:
         return self.group[name][...]
 

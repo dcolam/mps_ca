@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["napari[pyqt5]", "magicgui"]
+gui = ["napari[pyqt6]", "magicgui"]
 cellpose = ["cellpose"]
 dev = ["pytest"]
 

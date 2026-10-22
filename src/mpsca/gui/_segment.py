@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import numpy as np
-from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QProgressBar,
-                            QPushButton, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                            QProgressBar, QPushButton, QSizePolicy, QSpinBox, QStackedWidget,
+                            QVBoxLayout, QWidget)
 
 from .. import pipeline
 from ..analysis import figures as figs
@@ -31,6 +32,8 @@ CLASSIC_SPECS = {
     "max_cell_area": {"label": "Max area (px)", "max": 1000000},
 }
 CHANNELS = ("mean", "corr", "std", "max")
+SOURCES = ("Projections", "Selected image layer (movie: the current frame)",
+           "Movie, window by window")
 
 
 class SegmentTab(QWidget):
@@ -43,7 +46,9 @@ class SegmentTab(QWidget):
                            "better with noisy recordings; the classic threshold sweep is the "
                            "method of the original notebook. Afterwards, fix mistakes directly "
                            "in the 'ROIs' layer (paint, erase, fill, pick a new label with M) "
-                           "and press 'Save ROIs'."))
+                           "and press 'Save ROIs'. Cellpose can also run on any image layer, on one movie "
+                           "frame, or on the movie window by window (averages of N frames) to see "
+                           "how the cells change; Run all always uses the projections."))
         self.cb_method = QComboBox()
         self.cb_method.addItems(["Cellpose", "Classic threshold sweep"])
         lay.addWidget(self.cb_method)
@@ -53,15 +58,46 @@ class SegmentTab(QWidget):
         cp = QWidget()
         cl = QVBoxLayout(cp)
         cl.setContentsMargins(0, 0, 0, 0)
-        crow = QHBoxLayout()
-        crow.addWidget(QLabel("Input:"))
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("Input:"))
+        self.cb_source = QComboBox()
+        self.cb_source.addItems(SOURCES)
+        self.cb_source.setToolTip("Run all always segments the projections")
+        srow.addWidget(self.cb_source, 1)
+        cl.addLayout(srow)
+        # projections: ticked images are combined into one multi-channel input
+        self.ch_row = QWidget()
+        crow = QHBoxLayout(self.ch_row)
+        crow.setContentsMargins(0, 0, 0, 0)
         self.ch_boxes = {}
         for name in CHANNELS:
             box = QCheckBox(name)
             box.setChecked(name in ("mean", "corr"))
+            box.setToolTip("Ticked images are combined into ONE input with up to 3 channels "
+                           "(like the colours of an RGB image); there is one result")
+            box.toggled.connect(lambda on, b=box: self._limit_channels(b, on))
             self.ch_boxes[name] = box
             crow.addWidget(box)
-        cl.addLayout(crow)
+        cl.addWidget(self.ch_row)
+        # selected layer
+        self.layer_info = QLabel("")
+        self.layer_info.setWordWrap(True)
+        cl.addWidget(self.layer_info)
+        # movie, window by window
+        self.win_row = QWidget()
+        wrow = QHBoxLayout(self.win_row)
+        wrow.setContentsMargins(0, 0, 0, 0)
+        wrow.addWidget(QLabel("Average every"))
+        self.sp_window = QSpinBox()
+        self.sp_window.setRange(1, 100000)
+        self.sp_window.setValue(20)
+        self.sp_window.setToolTip("1 = every single frame (slow without a GPU)")
+        wrow.addWidget(self.sp_window)
+        wrow.addWidget(QLabel("frames;  frames"))
+        self.ed_win_frames = QLineEdit()
+        self.ed_win_frames.setPlaceholderText("all   e.g. 0-599")
+        wrow.addWidget(self.ed_win_frames, 1)
+        cl.addWidget(self.win_row)
         self.cp_form = ParamForm(cellpose_seg.CellposeParams, CELLPOSE_SPECS)
         cl.addWidget(self.cp_form)
         mrow = QHBoxLayout()
@@ -84,8 +120,17 @@ class SegmentTab(QWidget):
         self.stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         lay.addWidget(self.stack)
 
+        rrow = QHBoxLayout()
         self.btn_run = QPushButton("Run segmentation")
-        lay.addWidget(self.btn_run)
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setEnabled(False)
+        rrow.addWidget(self.btn_run, 1)
+        rrow.addWidget(self.btn_stop)
+        lay.addLayout(rrow)
+        self.btn_take = QPushButton("Use the ROIs of the current window")
+        self.btn_take.setToolTip("Copy the window segmentation at the time slider's frame "
+                                 "to the ROIs layer (then correct and save it)")
+        lay.addWidget(self.btn_take)
 
         edit = QGroupBox("Correct and save")
         el = QVBoxLayout(edit)
@@ -124,8 +169,17 @@ class SegmentTab(QWidget):
         self.cb_gpu.setChecked(cellpose_seg.available() and cellpose_seg.gpu_available())
         self.cb_gpu.setEnabled(self.cb_gpu.isChecked())
 
+        self._last_image = None
         self.cb_method.currentIndexChanged.connect(self.stack.setCurrentIndex)
+        self.cb_method.currentIndexChanged.connect(self._update_source)
+        self.cb_source.currentIndexChanged.connect(self._update_source)
         self.btn_run.clicked.connect(self.run)
+        self.btn_stop.clicked.connect(self.runner.stop)
+        self.btn_take.clicked.connect(self.take_window)
+        self.runner.busy.connect(lambda on: self.btn_stop.setEnabled(on and self._source() == 2))
+        session.viewer.layers.selection.events.active.connect(self._layer_selected)
+        session.store_changed.connect(self._update_source)
+        self._update_source()
         self.btn_measure.clicked.connect(self.measure_diameter)
         self.btn_clean.clicked.connect(self.clean)
         self.btn_save.clicked.connect(self.save)
@@ -148,6 +202,63 @@ class SegmentTab(QWidget):
         s.cellpose.gpu = self.cb_gpu.isChecked()
         s.classic = self.cl_form.value()
 
+    # ---- input source -------------------------------------------------------
+    def _source(self) -> int:
+        return self.cb_source.currentIndex() if self.cb_method.currentIndex() == 0 else 0
+
+    def _update_source(self, *_):
+        src = self._source()
+        self.ch_row.setVisible(src == 0)
+        self.layer_info.setVisible(src == 1)
+        self.win_row.setVisible(src == 2)
+        self.btn_stop.setVisible(src == 2)
+        self.btn_take.setVisible(self.session.windows_layer() is not None)
+        self._show_layer_info()
+
+    def _limit_channels(self, box, on):
+        if on and len(self.channels()) > 3:
+            box.setChecked(False)
+            self.status.setText("Cellpose takes at most 3 input images.")
+
+    def _layer_selected(self, event=None):
+        layer = self.session.viewer.layers.selection.active
+        if layer is not None and layer._type_string == "image" and not layer.rgb:
+            self._last_image = layer
+        self._show_layer_info()
+
+    def _show_layer_info(self):
+        layer = self._last_image
+        if layer is None or layer not in self.session.viewer.layers:
+            self.layer_info.setText("Select an image layer in napari's layer list.")
+        elif layer.ndim > 2:
+            self.layer_info.setText(f"Image: '{layer.name}', the frame shown by the time slider.")
+        else:
+            self.layer_info.setText(f"Image: '{layer.name}'.")
+
+    def current_image(self) -> tuple[np.ndarray, str]:
+        """The last selected image layer; for a movie, the frame at the time slider."""
+        layer = self._last_image
+        if layer is None or layer not in self.session.viewer.layers:
+            raise ValueError("Select an image layer in napari's layer list first.")
+        data = layer.data[0] if layer.multiscale else layer.data
+        lead = layer.ndim - 2
+        step = tuple(self.session.viewer.dims.current_step[-layer.ndim:][:lead])
+        step = tuple(min(max(int(i), 0), n - 1) for i, n in zip(step, data.shape))
+        source = f"layer '{layer.name}'" + (f", frame {', '.join(map(str, step))}" if lead else "")
+        return np.asarray(data[step], dtype=np.float32), source
+
+    def take_window(self):
+        layer = self.session.windows_layer()
+        if layer is None:
+            return
+        t = int(self.session.viewer.dims.current_step[0])
+        labels = np.asarray(layer.data[t])
+        if not labels.any():
+            self.status.setText(f"No window segmentation at frame {t}.")
+            return
+        self.session.show_labels(filter_area(labels, 1))
+        self.status.setText(f"ROIs of frame {t} copied to 'ROIs': correct them, then Save ROIs.")
+
     def _count(self):
         layer = self.session.roi_layer()
         self.count.setText(f"{int(layer.data.max())} ROIs" if layer is not None else "")
@@ -159,11 +270,36 @@ class SegmentTab(QWidget):
         store = self.session.store
         if store is None:
             return
+        lock = [self.btn_run, self.btn_save, self.btn_clean, self.btn_take]
+        self.session.pull_settings()
+        src = self._source()
+        if src == 1:
+            try:
+                image, source = self.current_image()
+            except ValueError as e:
+                self.status.setText(str(e))
+                return
+            p = self.cp_form.value()
+            p.gpu = self.cb_gpu.isChecked()
+            self.runner.run(pipeline.run_cellpose_image, store, image, source, p, with_progress=False,
+                            done=self._got_labels, lock=lock, message=f"Running Cellpose on {source}…")
+            return
+        if src == 2:
+            p = self.cp_form.value()
+            p.gpu = self.cb_gpu.isChecked()
+            frames = self.ed_win_frames.text().strip()
+            try:
+                n = len(pipeline.frame_windows(store.movie.shape[0], self.sp_window.value(), frames))
+            except ValueError as e:
+                self.status.setText(str(e))
+                return
+            self.runner.run(pipeline.run_cellpose_windows, store, self.sp_window.value(), p, frames,
+                            with_stop=True, done=self._got_windows, lock=lock,
+                            message=f"Running Cellpose on {n} windows…")
+            return
         if not pipeline.load_projections(store):
             self.status.setText("Compute the projections first (Preprocess).")
             return
-        lock = [self.btn_run, self.btn_save, self.btn_clean]
-        self.session.pull_settings()
         if self.stack.currentIndex() == 0:
             p = self.cp_form.value()
             p.gpu = self.cb_gpu.isChecked()
@@ -180,6 +316,18 @@ class SegmentTab(QWidget):
 
     def _got_labels(self, labels):
         self.session.show_labels(labels)
+
+    def _got_windows(self, done):
+        self.session.show_windows()
+        self._update_source()
+        n = self.session.store.load_array("windows/n_rois")[:done]
+        total = len(self.session.store.load_array("windows/first"))
+        if not done:
+            self.status.setText("Stopped before the first window was done.")
+            return
+        self.status.setText(f"{done} of {total} windows segmented, {n.min()}–{n.max()} ROIs each "
+                            "(numbers are not matched between windows). Scroll in time, then "
+                            "'Use the ROIs of the current window' to keep one.")
 
     def _got_sweep(self, sweep):
         self._sweep = sweep

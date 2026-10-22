@@ -1,4 +1,5 @@
 """End-to-end GUI tests on synthetic data (run offscreen; need napari + pytest-qt)."""
+import numpy as np
 import pytest
 
 pytest.importorskip("napari")
@@ -6,6 +7,7 @@ pytest.importorskip("pytestqt")
 
 from qtpy.QtCore import Qt  # noqa: E402
 
+from mpsca import pipeline  # noqa: E402
 from mpsca.gui._main import MainWidget  # noqa: E402
 from mpsca.project import Project, accept_proposals  # noqa: E402
 
@@ -181,3 +183,50 @@ def test_single_recording_without_project(widget, qtbot, synthetic_store, tmp_pa
     sm.add(s.store.path)
     sm.compare()
     assert sm.df is not None and len(sm.df) == 1
+
+
+def test_projection_frames_and_cellpose_sources(widget, qtbot, synthetic_store, monkeypatch):
+    from test_pipeline import _fake_cellpose
+
+    monkeypatch.setattr("mpsca.segment.cellpose_seg.run_cellpose", _fake_cellpose)
+    s = widget.session
+    store = s.open_store(synthetic_store["store"].path)
+    pre = widget.preprocess_tab
+    pre.ed_frames.setText("0-99")
+    pre.compute_projections()
+    _wait(qtbot, pre)
+    assert store.params("projections")["n_frames"] == 100
+    pre.ed_frames.setText("5000-")
+    pre.compute_projections()
+    assert "outside" in pre.status.text()
+
+    seg = widget.segment_tab
+    seg.cb_method.setCurrentIndex(0)
+    for box in seg.ch_boxes.values():
+        box.setChecked(True)
+    assert len(seg.channels()) == 3  # Cellpose takes at most three
+
+    # the selected layer: for the movie, the frame at the time slider
+    seg.cb_source.setCurrentIndex(1)
+    s.viewer.layers.selection.active = s.viewer.layers["movie"]
+    s.viewer.dims.set_current_step(0, 7)
+    image, source = seg.current_image()
+    assert source == "layer 'movie', frame 7" and np.allclose(image, store.movie[7])
+    seg.run()
+    _wait(qtbot, seg)
+    assert store.params("segment")["source"] == "layer 'movie', frame 7"
+    assert s.roi_layer().data.max() > 0
+
+    # the movie window by window, then keep the ROIs of one window
+    seg.cb_source.setCurrentIndex(2)
+    seg.sp_window.setValue(60)
+    seg.run()
+    _wait(qtbot, seg)
+    layer = s.windows_layer()
+    assert layer is not None and layer.data.shape == store.movie.shape
+    s.roi_layer().data = np.zeros_like(s.roi_layer().data)
+    s.viewer.dims.set_current_step(0, 130)
+    seg.take_window()
+    assert s.roi_layer().data.max() > 0
+    seg.save()
+    assert pipeline.active_labels(store)[0] == "edited"

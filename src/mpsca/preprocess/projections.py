@@ -43,8 +43,44 @@ def compute_projections(movie: da.Array, frame_idx: np.ndarray | None = None,
             "std": std, "corr": corr}
 
 
-def segmentation_frames(frames) -> np.ndarray:
-    """Frames used for projections: flagged for segmentation and not bad (fallback: all good)."""
+def parse_frames(text: str, n: int) -> np.ndarray | None:
+    """Frame indices from text such as ``"0-299, 1200-"`` (0-based, ends included).
+
+    ``a-`` runs to the last frame; ends beyond the movie are clipped. Empty text gives None.
+    """
+    if not text or not text.strip():
+        return None
+    idx = []
+    for part in text.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, sep, b = part.partition("-")
+        try:
+            lo = int(a)
+            hi = (int(b) if b.strip() else n - 1) if sep else lo
+        except ValueError:
+            raise ValueError(f"cannot read frame range '{part}' (use e.g. 0-299, 1200-)") from None
+        if lo >= n:
+            raise ValueError(f"frame range '{part}' is outside the movie (frames 0-{n - 1})")
+        if hi < lo:
+            raise ValueError(f"frame range '{part}' ends before it starts")
+        idx.extend(range(lo, min(hi, n - 1) + 1))
+    return np.unique(np.asarray(idx, dtype=int))
+
+
+def segmentation_frames(frames, selection: str = "") -> np.ndarray:
+    """Frames used for projections, never the bad ones.
+
+    With a ``selection`` (see :func:`parse_frames`) those frames are used, otherwise the
+    frames flagged for segmentation (fallback: all good frames).
+    """
     good = ~frames["is_bad"].to_numpy()
+    chosen = parse_frames(selection, len(frames))
+    if chosen is not None:
+        keep = chosen[good[chosen]]
+        if not len(keep):
+            raise ValueError(f"frames '{selection}' are all bad frames")
+        return keep
     seg = frames["use_for_seg"].to_numpy() & good
     return np.flatnonzero(seg if seg.any() else good)

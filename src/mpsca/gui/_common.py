@@ -1,6 +1,7 @@
 """Shared Qt helpers: background workers with progress, figure panels, parameter forms."""
 from __future__ import annotations
 
+import threading
 import traceback
 from dataclasses import fields
 from typing import Any, Callable
@@ -21,6 +22,7 @@ class Runner(QObject):
 
     The function receives ``progress=callable(fraction)`` when ``with_progress`` is set,
     and ``say=callable(text)`` when ``with_say`` is set (shown in ``log``, a list widget).
+    With ``with_stop`` it receives ``should_stop=callable()``, which turns True after ``stop()``.
     Widgets listed in ``lock`` are disabled while it runs.
     """
     busy = Signal(bool)
@@ -29,6 +31,7 @@ class Runner(QObject):
         super().__init__(parent)
         self._parent, self._bar, self._status, self._log = parent, bar, status, log
         self._worker = None
+        self._stop = threading.Event()
         self._bridge = _Bridge()
         self._bridge.progress.connect(lambda f: self._bar.setValue(int(round(f * 100))))
         self._bridge.message.connect(self._show_message)
@@ -44,8 +47,13 @@ class Runner(QObject):
     def running(self) -> bool:
         return self._worker is not None
 
+    def stop(self) -> None:
+        """Ask a job started ``with_stop`` to finish early."""
+        self._stop.set()
+
     def run(self, fn: Callable, *args, done: Callable[[Any], None] | None = None,
-            message: str = "", with_progress: bool = True, with_say: bool = False, lock=(), **kwargs):
+            message: str = "", with_progress: bool = True, with_say: bool = False,
+            with_stop: bool = False, lock=(), **kwargs):
         from napari.qt.threading import create_worker
 
         if self._worker is not None:
@@ -55,6 +63,9 @@ class Runner(QObject):
             kwargs["progress"] = self._bridge.progress.emit
         if with_say:
             kwargs["say"] = self._bridge.message.emit
+        if with_stop:
+            self._stop.clear()
+            kwargs["should_stop"] = self._stop.is_set
         self._bar.setRange(0, 100 if with_progress else 0)  # 0..0 = busy indicator
         self._bar.setValue(0)
         self._bar.setVisible(True)
