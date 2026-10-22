@@ -12,6 +12,8 @@ from ..pipeline import PipelineSettings
 
 ROI_LAYER = "ROIs"
 WINDOWS_LAYER = "ROIs per window"
+NUMBERS_LAYER = "ROI numbers"
+SELECTED_LAYER = "selected cell"
 MOVIE_LAYER = "movie"
 
 
@@ -32,6 +34,7 @@ class Session(QObject):
         self.store: ExperimentStore | None = None
         self._settings = PipelineSettings()
         self.settings_tabs: list = []   # tabs with read_settings(s) / write_settings(s)
+        self.outlines = False           # ROIs drawn as numbered outlines instead of filled
 
     # ---- project and the processing settings shared by all recordings ---------------
     def set_project(self, project) -> None:
@@ -117,8 +120,58 @@ class Session(QObject):
             layer = self.viewer.add_labels(labels.astype(np.int32), name=ROI_LAYER, opacity=0.45,
                                            metadata={"mpsca": True})
         self.viewer.layers.selection.active = layer
+        self._style_rois()
+        self.highlight_cell(None)
         self.labels_changed.emit()
         return layer
+
+    def set_outlines(self, on: bool) -> None:
+        self.outlines = on
+        self._style_rois()
+
+    def _style_rois(self) -> None:
+        """Filled ROIs for editing, or outlines numbered like the traces (cell n = label n)."""
+        layer = self.roi_layer()
+        if NUMBERS_LAYER in self.viewer.layers:
+            self.viewer.layers.remove(NUMBERS_LAYER)
+        if layer is None:
+            return
+        layer.contour = 1 if self.outlines else 0
+        layer.opacity = 0.9 if self.outlines else 0.45
+        if not self.outlines:
+            return
+        from skimage.measure import regionprops
+
+        props = regionprops(np.asarray(layer.data))
+        if not props:
+            return
+        self.viewer.add_points(np.array([rp.centroid for rp in props]), name=NUMBERS_LAYER, size=0,
+                               features={"cell": [rp.label for rp in props]},
+                               text={"string": "{cell}", "color": "white", "size": 8},
+                               metadata={"mpsca": True})
+        self.viewer.layers.selection.active = layer
+
+    def highlight_cell(self, cell: int | None) -> None:
+        """Draw a bright outline around one ROI (None removes it)."""
+        layer = self.roi_layer()
+        if layer is None or not cell:
+            if SELECTED_LAYER in self.viewer.layers:
+                self.viewer.layers[SELECTED_LAYER].visible = False
+            return
+        from skimage.morphology import dilation, disk
+
+        mask = np.asarray(layer.data) == cell
+        ring = (dilation(mask, disk(2)) & ~mask).astype(np.float32)
+        if SELECTED_LAYER in self.viewer.layers:
+            sel = self.viewer.layers[SELECTED_LAYER]
+            sel.data = ring
+            sel.visible = True
+        else:
+            sel = self.viewer.add_image(ring, name=SELECTED_LAYER, colormap="yellow",
+                                        blending="additive", contrast_limits=(0, 1),
+                                        metadata={"mpsca": True})
+        sel.metadata["cell"] = cell
+        self.viewer.layers.selection.active = layer
 
     def show_windows(self, visible: bool = True):
         """The movie segmented window by window, as labels that follow the time slider."""

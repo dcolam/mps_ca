@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import numpy as np
-from qtpy.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
-                            QSpinBox, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar,
+                            QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import pipeline
 from ..analysis import epochs_from_frames
@@ -32,7 +32,9 @@ class TracesTab(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(hint("Extract the mean intensity of every saved ROI in every frame and compute "
                            "ΔF/F against a rolling-percentile baseline (separately for each "
-                           "recording block). Click an ROI in the viewer to plot its trace."))
+                           "recording block). Click an ROI in the viewer to plot its trace. "
+                           "The yellow line in the plots is the frame shown in the viewer: click "
+                           "or drag in a plot to move through the movie."))
         self.form = ParamForm(DffParams, DFF_SPECS)
         lay.addWidget(self.form)
         row = QHBoxLayout()
@@ -49,6 +51,10 @@ class TracesTab(QWidget):
         self.sp_cell.setRange(1, 1)
         crow.addWidget(self.sp_cell)
         crow.addStretch()
+        self.cb_outlines = QCheckBox("ROIs as numbered outlines")
+        self.cb_outlines.setToolTip("Numbers are the cell numbers of the traces and exports. "
+                                    "Untick to edit ROIs (filled)")
+        crow.addWidget(self.cb_outlines)
         lay.addLayout(crow)
         self.trace = FigurePanel()
         lay.addWidget(self.trace)
@@ -60,8 +66,11 @@ class TracesTab(QWidget):
         lay.addWidget(self.status)
         lay.addStretch()
         self.runner = Runner(self, self.bar, self.status)
+        self._cursors: dict = {}  # figure panel -> (vertical lines, frame -> x)
 
         self.btn_offset.clicked.connect(self.estimate)
+        self.cb_outlines.toggled.connect(session.set_outlines)
+        session.viewer.dims.events.current_step.connect(self._move_cursors)
         self.btn_run.clicked.connect(self.run)
         self.sp_cell.valueChanged.connect(self.show_cell)
         session.traces_changed.connect(self.load)
@@ -116,8 +125,12 @@ class TracesTab(QWidget):
         frames = store.read_frames()
         self.epochs = epochs_from_frames(frames, pipeline.fps_of(store))
         dff = self.traces["dff"]
-        self.heat.set_figure(figs.dff_heatmap(dff, self.traces["time_s"], self.epochs))
+        fig = figs.dff_heatmap(dff, self.traces["time_s"], self.epochs)
+        self.heat.set_figure(fig)
+        self._add_cursor(self.heat, fig.axes[:1], lambda t: t, lambda x: x)
+        self.heat.canvas.mpl_connect("button_press_event", self._heat_pick)
         self.sp_cell.setRange(1, max(1, dff.shape[0]))
+        self.cb_outlines.setChecked(True)  # number the cells like the traces
         self.status.setText(f"{dff.shape[0]} cells × {dff.shape[1]} frames. Next: Analysis.")
         self.show_cell(self.sp_cell.value())
 
@@ -127,8 +140,53 @@ class TracesTab(QWidget):
         i = cell - 1
         tr = self.traces
         offset = self.session.store.params("traces").get("offset") or 0.0
-        self.trace.set_figure(figs.cell_trace(tr["time_s"], tr["F"][i], tr["dff"][i], cell,
-                                              self.epochs, tr["F0"][i] + offset))
+        fig = figs.cell_trace(tr["time_s"], tr["F"][i], tr["dff"][i], cell, self.epochs,
+                              tr["F0"][i] + offset)
+        self.trace.set_figure(fig)
+        t = tr["time_s"]
+        self._add_cursor(self.trace, fig.axes, lambda f: t[f], lambda x: np.abs(t - x).argmin())
+        self.session.highlight_cell(cell)
+
+    def _heat_pick(self, event):
+        """A click in the heatmap also shows the trace of that row's cell."""
+        tb = self.heat._toolbar
+        if tb is not None and getattr(tb.mode, "value", tb.mode):
+            return
+        if event.button == 1 and event.inaxes is self.heat.canvas.figure.axes[0] and event.ydata:
+            self.sp_cell.setValue(int(round(event.ydata)))
+
+    # ---- the current frame in the plots ---------------------------------------
+    def _frame(self) -> int:
+        return int(self.session.viewer.dims.current_step[0])
+
+    def _add_cursor(self, panel, axes, frame_to_x, x_to_frame):
+        """Vertical line at the viewer's frame; click or drag in the plot to move the slider."""
+        x = frame_to_x(min(self._frame(), len(self.traces["time_s"]) - 1))
+        lines = [ax.axvline(x, color="gold", lw=1.2, zorder=10) for ax in axes]
+        self._cursors[panel] = (lines, frame_to_x)
+
+        def on_mouse(event):
+            tb = panel._toolbar
+            if tb is not None and getattr(tb.mode, "value", tb.mode):  # zoom / pan active
+                return
+            if event.button == 1 and event.inaxes in axes and event.xdata is not None:
+                n = len(self.traces["time_s"])
+                self.session.viewer.dims.set_current_step(0, int(np.clip(round(x_to_frame(event.xdata)), 0, n - 1)))
+
+        panel.canvas.mpl_connect("button_press_event", on_mouse)
+        panel.canvas.mpl_connect("motion_notify_event", on_mouse)
+        panel.canvas.draw_idle()
+
+    def _move_cursors(self, event=None):
+        if self.traces is None:
+            return
+        f = min(self._frame(), len(self.traces["time_s"]) - 1)
+        for panel, (lines, frame_to_x) in self._cursors.items():
+            x = frame_to_x(f)
+            for line in lines:
+                line.set_xdata([x, x])
+            if panel.canvas is not None:
+                panel.canvas.draw_idle()
 
     def _on_click(self, viewer, event):
         layer = self.session.roi_layer()

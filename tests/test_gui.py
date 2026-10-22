@@ -169,6 +169,31 @@ def test_single_recording_without_project(widget, qtbot, synthetic_store, tmp_pa
     assert tr.traces["dff"].shape[0] == n_before - 1
     tr.show_cell(2)
     assert tr.trace.canvas is not None
+    # numbered outlines, the selected cell highlighted, the current frame in the plots
+    assert tr.cb_outlines.isChecked() and s.roi_layer().contour == 1
+    numbers = widget.viewer.layers["ROI numbers"]
+    assert sorted(numbers.features["cell"]) == list(range(1, n_before))
+    sel = widget.viewer.layers["selected cell"]
+    assert sel.visible and sel.metadata["cell"] == 2
+    ring = sel.data > 0
+    assert ring.any() and not (ring & (s.roi_layer().data == 2)).any()
+    widget.viewer.dims.set_current_step(0, 50)
+    lines, _ = tr._cursors[tr.trace]
+    assert lines[0].get_xdata()[0] == tr.traces["time_s"][50]
+    from matplotlib.backend_bases import MouseEvent
+    ax = tr.trace.canvas.figure.axes[1]
+    tr.trace.canvas.draw()
+    px, py = ax.transData.transform((tr.traces["time_s"][120], 0))
+    MouseEvent("button_press_event", tr.trace.canvas, px, py, button=1)._process()
+    assert widget.viewer.dims.current_step[0] == 120
+    tr.heat.canvas.draw()
+    hax = tr.heat.canvas.figure.axes[0]
+    px, py = hax.transData.transform((30, 4))
+    MouseEvent("button_press_event", tr.heat.canvas, px, py, button=1)._process()
+    assert tr.sp_cell.value() == 4 and widget.viewer.dims.current_step[0] == 30
+    assert sel.metadata["cell"] == 4
+    tr.cb_outlines.setChecked(False)
+    assert s.roi_layer().contour == 0 and "ROI numbers" not in widget.viewer.layers
 
     an = widget.analysis_tab
     an.run()

@@ -77,6 +77,13 @@ Start the GUI with `mpsca gui` (or `mpsca gui D:\mpsca_data` to reopen a project
    follow the time slider in the *ROIs per window* layer; *Use the ROIs of the current
    window* copies one to *ROIs*. ROI numbers are not matched between windows, so traces
    always use the single *ROIs* image. *Run all* always segments the projections.
+
+   After the traces are extracted, the ROIs are drawn as outlines numbered like the
+   traces and the exported tables (untick *ROIs as numbered outlines* to edit them).
+   Clicking an ROI, choosing a cell number or clicking a heatmap row shows that cell's
+   trace and outlines the cell in yellow in the viewer. A yellow line in the heatmap
+   and the trace marks the frame shown in the viewer; click or drag in a plot to move
+   through the movie (napari's ▶ button plays it with the line following).
 3. **Run all** tab: shows exactly the settings that will be used, the steps to run and
    the converted recordings. ROIs corrected by hand are kept unless unticked.
 4. **Summary** tab: *Project recordings* adds all analysed recordings; group them by any
